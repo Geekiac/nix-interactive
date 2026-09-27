@@ -53,6 +53,11 @@ fn render_versions(versions: &[Version], p: &Painter) -> String {
         .join(", ")
 }
 
+/// Versions as plain text, laid out like the colored diff output.
+pub fn plain_versions(versions: &[Version]) -> String {
+    render_versions(versions, &Painter { color: false })
+}
+
 /// Human-readable signed byte count, e.g. `+50.2KiB` or `-512B`.
 pub fn render_bytes(bytes: i128) -> String {
     const UNITS: [&str; 6] = ["KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];

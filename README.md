@@ -2,7 +2,22 @@
 
 Interactive historical diff viewer for Nix generations (work in progress — see `plan.md`).
 
-The binary is `nixi`. So far it has nvd-compatible diffs and a generation list:
+The binary is `nixi`. Run it with no arguments for the interactive viewer:
+
+```sh
+nixi                      # system and home-manager generations, side by side with diffs
+nixi --home               # start on the home-manager tab
+nixi --path ./result      # also browse ./result (repeatable) in a "paths" tab
+```
+
+The left pane lists generations; the right pane shows what changed. Unpinned, it shows
+what the highlighted generation changed compared with the one before it, so walking the
+list replays your history switch by switch. `space` pins the old side and `enter` the new
+side for arbitrary comparisons, `/` filters packages, `s` sorts by size change,
+`u d c a r b` show or hide upgraded, downgraded, changed, added, removed and rebuilt
+packages, and `?` lists every key. Closures load in the background, newest first.
+
+There are also one-shot commands:
 
 ```sh
 nixi diff                 # current system generation vs the one before it

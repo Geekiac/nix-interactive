@@ -105,6 +105,8 @@ pub struct VersionChange {
     pub left: Vec<Version>,
     pub right: Vec<Version>,
     pub selection: Selection,
+    /// Change in total NAR size of this pname's store paths.
+    pub size_delta: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +114,8 @@ pub struct PackageEntry {
     pub pname: String,
     pub versions: Vec<Version>,
     pub selection: Selection,
+    /// Change in total NAR size of this pname's store paths.
+    pub size_delta: i64,
 }
 
 #[derive(Debug, Default)]
@@ -122,7 +126,7 @@ pub struct ClosureDiff {
     pub added: Vec<PackageEntry>,
     pub removed: Vec<PackageEntry>,
     /// Same versions, different store paths: rebuilt because a dependency or build input changed.
-    pub rebuilt: Vec<String>,
+    pub rebuilt: Vec<PackageEntry>,
     pub left_path_count: usize,
     pub right_path_count: usize,
     pub paths_added: usize,
@@ -133,6 +137,13 @@ pub struct ClosureDiff {
 
 fn versions(pkgs: &[Package]) -> Vec<Version> {
     pkgs.iter().map(|p| p.version.clone()).collect()
+}
+
+fn nar_size(closure: &Closure, pkgs: &[Package]) -> i64 {
+    pkgs.iter()
+        .filter_map(|p| closure.paths.get(&p.path))
+        .map(|i| i.nar_size as i64)
+        .sum()
 }
 
 fn paths(pkgs: &[Package]) -> Vec<&str> {
@@ -163,14 +174,17 @@ pub fn diff(left: &Closure, right: &Closure) -> ClosureDiff {
     let mut d = ClosureDiff::default();
     for (pname, left_pkgs) in &left_set.by_pname {
         let sel = selection(pname);
+        let left_size = nar_size(left, left_pkgs);
         let Some(right_pkgs) = right_set.get(pname) else {
             d.removed.push(PackageEntry {
                 pname: pname.clone(),
                 versions: versions(left_pkgs),
                 selection: sel,
+                size_delta: -left_size,
             });
             continue;
         };
+        let size_delta = nar_size(right, right_pkgs) - left_size;
         let (lv, rv) = (versions(left_pkgs), versions(right_pkgs));
         if lv != rv {
             let kind = if lv[lv.len() - 1] < rv[0] {
@@ -186,15 +200,22 @@ pub fn diff(left: &Closure, right: &Closure) -> ClosureDiff {
                 left: lv,
                 right: rv,
                 selection: sel,
+                size_delta,
             });
         } else if sel.changed() {
             d.selection_changes.push(PackageEntry {
                 pname: pname.clone(),
                 versions: lv,
                 selection: sel,
+                size_delta,
             });
         } else if paths(left_pkgs) != paths(right_pkgs) {
-            d.rebuilt.push(pname.clone());
+            d.rebuilt.push(PackageEntry {
+                pname: pname.clone(),
+                versions: lv,
+                selection: sel,
+                size_delta,
+            });
         }
     }
     for (pname, right_pkgs) in &right_set.by_pname {
@@ -203,6 +224,7 @@ pub fn diff(left: &Closure, right: &Closure) -> ClosureDiff {
                 pname: pname.clone(),
                 versions: versions(right_pkgs),
                 selection: selection(pname),
+                size_delta: nar_size(right, right_pkgs),
             });
         }
     }
@@ -300,7 +322,14 @@ mod tests {
             ["gone"]
         );
         // The unversioned roots share the pname `system`, so they count as a rebuild too.
-        assert_eq!(d.rebuilt, ["system", "zlib"]);
+        let rebuilt: Vec<&str> = d.rebuilt.iter().map(|e| e.pname.as_str()).collect();
+        assert_eq!(rebuilt, ["system", "zlib"]);
+        assert_eq!(
+            (d.added[0].size_delta, d.removed[0].size_delta),
+            (100, -100)
+        );
+        // curl keeps two store paths on each side, so its size is unchanged.
+        assert_eq!(d.version_changes[0].size_delta, 0);
         assert_eq!((d.left_path_count, d.right_path_count), (9, 9));
         assert_eq!((d.paths_added, d.paths_removed), (6, 6));
         assert_eq!((d.left_size, d.right_size), (900, 900));

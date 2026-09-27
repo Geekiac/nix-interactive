@@ -1,0 +1,444 @@
+//! Drawing. Uses the terminal's own 16-color palette so it fits light and dark themes.
+
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Cell, Clear, List, ListItem, Paragraph, Row, Table, Tabs, Wrap};
+use ratatui::Frame;
+
+use super::app::{App, Category, Focus, Gens, Sort, TabKind};
+use crate::render::{plain_versions, render_bytes};
+use crate::sources::Generation;
+use crate::store_path::parse_name;
+
+const LIST_WIDTH: u16 = 52;
+
+fn category_color(category: Category) -> Color {
+    match category {
+        Category::Upgraded => Color::Cyan,
+        Category::Downgraded => Color::Yellow,
+        Category::Changed | Category::Selection => Color::Magenta,
+        Category::Added => Color::Green,
+        Category::Removed => Color::Red,
+        Category::Rebuilt => Color::DarkGray,
+    }
+}
+
+fn pane_block(title: Line<'_>, focused: bool) -> Block<'_> {
+    let block = Block::bordered().title(title);
+    if focused {
+        block.border_style(Style::new().fg(Color::Blue))
+    } else {
+        block.border_style(Style::new().fg(Color::DarkGray))
+    }
+}
+
+pub fn draw(f: &mut Frame, app: &mut App) {
+    let [tabs_area, main, status] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+    ])
+    .areas(f.area());
+    let list_width = LIST_WIDTH.min(main.width / 2);
+    let [list_area, diff_area] =
+        Layout::horizontal([Constraint::Length(list_width), Constraint::Fill(1)]).areas(main);
+
+    draw_tabs(f, app, tabs_area);
+    draw_list(f, app, list_area);
+    draw_diff(f, app, diff_area);
+    draw_status(f, app, status);
+    if app.show_help {
+        draw_help(f);
+    }
+}
+
+fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
+    let titles = app
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(i, t)| format!("{} {}", i + 1, t.title));
+    let tabs = Tabs::new(titles)
+        .select(app.active)
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD))
+        .divider(" ");
+    f.render_widget(tabs, area);
+}
+
+/// Short description for a generation row: the NixOS version for systems, the version in
+/// the name for other profiles, else the start of the store hash.
+fn describe(g: &Generation, kind: TabKind) -> String {
+    if kind == TabKind::Paths {
+        return g.path.display().to_string();
+    }
+    let file = g.store_path.rsplit('/').next().unwrap_or("");
+    // `<hash>-nixos-system-<host>-<version>`: hostnames can contain `-<digit>`, which trips
+    // up the generic name/version split, but the version never contains `-`.
+    if file.contains("-nixos-system-") {
+        if let Some((_, version)) = file.rsplit_once('-') {
+            return version.to_owned();
+        }
+    }
+    match parse_name(&g.store_path) {
+        (_, Some(version)) => version.to_owned(),
+        _ => file.chars().take(8).collect(),
+    }
+}
+
+fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.focus == Focus::List;
+    let pair = app.tab().pair();
+    let tab = &mut app.tabs[app.active];
+    let block = pane_block(Line::from(" Generations "), focused);
+    let gens = match &tab.gens {
+        Gens::Ready(gens) => gens,
+        Gens::Loading => {
+            f.render_widget(Paragraph::new("Loading…").block(block), area);
+            return;
+        }
+        Gens::Failed(e) => {
+            let p = Paragraph::new(e.as_str())
+                .wrap(Wrap { trim: true })
+                .block(block);
+            f.render_widget(p, area);
+            return;
+        }
+    };
+    let width = gens
+        .iter()
+        .map(|g| g.number_label().len())
+        .max()
+        .unwrap_or(0);
+    let items: Vec<ListItem> = gens
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let (label, color, pinned) = match pair {
+                Some((old, _)) if old == i => ("old", Color::Red, tab.base == Some(i)),
+                Some((_, new)) if new == i => ("new", Color::Green, tab.target == Some(i)),
+                _ => ("   ", Color::Reset, false),
+            };
+            let mut marker = Style::new().fg(color).bold();
+            if pinned {
+                marker = marker.add_modifier(Modifier::UNDERLINED);
+            }
+            ListItem::new(Line::from(vec![
+                Span::styled(label, marker),
+                Span::raw(if g.current { " * " } else { "   " }),
+                Span::styled(format!("{:>width$}", g.number_label()), Style::new().bold()),
+                Span::raw("  "),
+                Span::styled(g.created_label(), Style::new().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::raw(describe(g, tab.kind)),
+            ]))
+        })
+        .collect();
+    let highlight = if focused {
+        Style::new().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::new().add_modifier(Modifier::BOLD)
+    };
+    let list = List::new(items).block(block).highlight_style(highlight);
+    tab.list_state.select(Some(tab.cursor));
+    app.list_height = area.height.saturating_sub(2) as usize;
+    f.render_stateful_widget(list, area, &mut tab.list_state);
+}
+
+fn message(f: &mut Frame, area: Rect, block: Block, text: String) {
+    let p = Paragraph::new(text).wrap(Wrap { trim: true }).block(block);
+    f.render_widget(p, area);
+}
+
+fn draw_diff(f: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.focus == Focus::Diff;
+    let tab = app.tab();
+    let Some((old, new)) = app.pair_paths() else {
+        let text = match tab.gens {
+            Gens::Ready(_) => {
+                "No earlier generation to compare with. Pin another as old with space.".to_owned()
+            }
+            _ => String::new(),
+        };
+        message(f, area, pane_block(Line::from(" Diff "), focused), text);
+        return;
+    };
+    let title = Line::from(vec![
+        Span::raw(format!(" {} ", tab.title)),
+        Span::styled(old.number_label(), Style::new().fg(Color::Red).bold()),
+        Span::raw(" → "),
+        Span::styled(new.number_label(), Style::new().fg(Color::Green).bold()),
+        Span::raw(" "),
+    ]);
+    let block = pane_block(title, focused);
+
+    if old.store_path == new.store_path {
+        let text = "Old and new are the same closure.".to_owned();
+        message(f, area, block, text);
+        return;
+    }
+    for g in [old, new] {
+        if let Some(e) = app.errors.get(&g.store_path) {
+            let text = format!("Couldn't load generation {}: {e}", g.number_label());
+            message(f, area, block, text);
+            return;
+        }
+    }
+    let Some(current) = app.shown_diff() else {
+        message(f, area, block, "Loading closures…".to_owned());
+        return;
+    };
+
+    let d = &current.diff;
+    let mut counts: Vec<Span> = Vec::new();
+    for category in Category::ALL {
+        let hidden = app.hidden.contains(&category.toggle_key());
+        let style = if hidden {
+            Style::new()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::CROSSED_OUT)
+        } else {
+            Style::new().fg(category_color(category))
+        };
+        counts.push(Span::styled(
+            format!("{} {}", current.count(category), category.name()),
+            style,
+        ));
+        counts.push(Span::raw("  "));
+    }
+    let size_delta = i128::from(d.right_size) - i128::from(d.left_size);
+    let mut summary = vec![
+        Span::raw(format!(
+            "paths {} → {} (+{} −{})  disk ",
+            d.left_path_count, d.right_path_count, d.paths_added, d.paths_removed
+        )),
+        Span::styled(render_bytes(size_delta), Style::new().bold()),
+        Span::raw(format!(
+            "  sort: {}",
+            match app.sort {
+                Sort::Name => "name",
+                Sort::Size => "size",
+            }
+        )),
+    ];
+    if !app.filter.is_empty() {
+        summary.push(Span::styled(
+            format!("  filter: {}", app.filter),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+
+    let rows = app.visible_rows();
+    let pname_width = rows
+        .iter()
+        .map(|r| r.pname.chars().count())
+        .max()
+        .unwrap_or(7)
+        .clamp(7, 32) as u16;
+    let table_rows: Vec<Row> = rows
+        .iter()
+        .map(|r| {
+            let color = category_color(r.category);
+            let mut pname = Style::new();
+            if r.selection.selected_anywhere() {
+                pname = pname.bold();
+            }
+            let size = if r.size_delta == 0 {
+                String::new()
+            } else {
+                render_bytes(i128::from(r.size_delta))
+            };
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    format!("{}{}", r.category.marker(), r.selection.marker()),
+                    Style::new().fg(color).bold(),
+                )),
+                Cell::from(Span::styled(r.pname.clone(), pname)),
+                Cell::from(Span::styled(
+                    plain_versions(&r.left),
+                    Style::new().fg(Color::Red),
+                )),
+                Cell::from(Span::styled(
+                    plain_versions(&r.right),
+                    Style::new().fg(Color::Green),
+                )),
+                Cell::from(Line::from(size).right_aligned()),
+            ])
+        })
+        .collect();
+    let empty = table_rows.is_empty();
+    let header = Row::new(["", "Package", "Old", "New", "Size"]).style(Style::new().bold());
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Length(2),
+            Constraint::Length(pname_width),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Length(10),
+        ],
+    )
+    .header(header)
+    .row_highlight_style(if focused {
+        Style::new().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::new()
+    });
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let [counts_area, summary_area, table_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(inner);
+    f.render_widget(Paragraph::new(Line::from(counts)), counts_area);
+    f.render_widget(Paragraph::new(Line::from(summary)), summary_area);
+    if empty {
+        let text = if current.rows.is_empty() {
+            "No package changes."
+        } else {
+            "No packages match the filter and category toggles."
+        };
+        f.render_widget(Paragraph::new(text).fg(Color::DarkGray), table_area);
+    } else {
+        app.diff_height = table_area.height.saturating_sub(1) as usize;
+        f.render_stateful_widget(table, table_area, &mut app.diff_state);
+    }
+}
+
+fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+    let line = if app.editing_filter {
+        Line::from(vec![
+            Span::styled("/", Style::new().fg(Color::Yellow).bold()),
+            Span::raw(app.filter.as_str()),
+            Span::styled("█", Style::new().fg(Color::Yellow)),
+            Span::styled(
+                "  enter: keep  esc: clear",
+                Style::new().fg(Color::DarkGray),
+            ),
+        ])
+    } else {
+        let key = |k: &'static str| Span::styled(k, Style::new().bold());
+        let hint = |h: &'static str| Span::styled(h, Style::new().fg(Color::DarkGray));
+        Line::from(vec![
+            key("space"),
+            hint(" pin old  "),
+            key("enter"),
+            hint(" pin new  "),
+            key("esc"),
+            hint(" unpin  "),
+            key("tab"),
+            hint(" pane  "),
+            key("/"),
+            hint(" filter  "),
+            key("s"),
+            hint(" sort  "),
+            key("udcarb"),
+            hint(" toggle  "),
+            key("?"),
+            hint(" help  "),
+            key("q"),
+            hint(" quit"),
+        ])
+    };
+    f.render_widget(Paragraph::new(line), area);
+}
+
+fn draw_help(f: &mut Frame) {
+    let lines = [
+        ("j/k ↑/↓", "move in the focused pane"),
+        ("g/G PgUp/PgDn", "jump to top/bottom, page"),
+        ("tab h/l ←/→", "switch pane"),
+        ("1-9", "switch tab (system, home-manager, paths)"),
+        (
+            "space",
+            "pin the old side to this generation (again: unpin)",
+        ),
+        (
+            "enter",
+            "pin the new side to this generation (again: unpin)",
+        ),
+        ("esc", "clear the filter, else unpin both sides"),
+        ("", "unpinned: new = cursor, old = the generation before it"),
+        ("/", "filter packages by name"),
+        ("s", "sort by name or by size change"),
+        ("u d c a r b", "show/hide upgraded, downgraded, changed,"),
+        ("", "added, removed, rebuilt (hidden by default)"),
+        ("q ctrl-c", "quit"),
+    ];
+    let text: Vec<Line> = lines
+        .iter()
+        .map(|(k, v)| {
+            Line::from(vec![
+                Span::styled(format!("{k:>14}  "), Style::new().bold()),
+                Span::raw(*v),
+            ])
+        })
+        .collect();
+    let [area] = Layout::horizontal([Constraint::Length(74)])
+        .flex(Flex::Center)
+        .areas(f.area());
+    let [area] = Layout::vertical([Constraint::Length(text.len() as u16 + 2)])
+        .flex(Flex::Center)
+        .areas(area);
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(text).block(Block::bordered().title(" Keys (any key closes) ")),
+        area,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::app::tests::app;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn screen(app: &mut App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(140, 20)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn draws_generations_and_diff() {
+        let mut app = app();
+        let s = screen(&mut app);
+        assert!(s.contains("1 system"), "{s}");
+        assert!(s.contains("2 home (bob)"), "{s}");
+        assert!(s.contains("old   42"), "{s}");
+        assert!(s.contains("new * 43"), "{s}");
+        assert!(s.contains("system 42 → 43"), "{s}");
+        assert!(s.contains("1 upgraded"), "{s}");
+        // The fixture roots reference every package, so all of them count as selected.
+        assert!(s.contains("U* firefox"), "{s}");
+        assert!(s.contains("141.0.2"), "{s}");
+        assert!(s.contains("R- htop"), "{s}");
+        assert!(s.contains("-20.5KiB"), "{s}");
+    }
+
+    #[test]
+    fn draws_help_and_empty_states() {
+        let mut app = app();
+        app.show_help = true;
+        assert!(screen(&mut app).contains("Keys (any key closes)"));
+        app.show_help = false;
+        app.filter = "zzz".into();
+        assert!(screen(&mut app).contains("No packages match"));
+        app.tabs[0].cursor = 0;
+        assert!(screen(&mut app).contains("No earlier generation"));
+        app.active = 1;
+        assert!(screen(&mut app).contains("Loading…"));
+    }
+}

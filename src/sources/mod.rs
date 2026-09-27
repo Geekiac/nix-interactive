@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Local};
 
 use crate::closure::Cache;
 
@@ -28,6 +29,18 @@ pub struct Generation {
 impl Generation {
     pub fn covers(&self, n: u64) -> bool {
         (self.number..=self.last_number).contains(&n)
+    }
+
+    /// Local creation time as `YYYY-MM-DD HH:MM`, or `?` when unknown.
+    pub fn created_label(&self) -> String {
+        self.created.map_or_else(
+            || "?".to_owned(),
+            |t| {
+                DateTime::<Local>::from(t)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            },
+        )
     }
 
     pub fn number_label(&self) -> String {

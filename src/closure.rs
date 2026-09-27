@@ -160,6 +160,7 @@ fn parse_path_info(json: &Value) -> Result<Vec<PathInfo>> {
 }
 
 /// Closure cache keyed by root store path. Store paths are immutable, so entries never go stale.
+#[derive(Clone)]
 pub struct Cache {
     dir: PathBuf,
 }

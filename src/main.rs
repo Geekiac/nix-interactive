@@ -3,23 +3,32 @@ mod diff;
 mod render;
 mod sources;
 mod store_path;
+mod ui;
 
 use std::io::{self, IsTerminal, StdoutLock, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
-use chrono::{DateTime, Local};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::closure::{Cache, Closure};
 use crate::sources::{profile::SYSTEM_PROFILE, Generation, Source};
 
 /// Interactive historical diff viewer for Nix generations.
+///
+/// With no subcommand, opens the interactive viewer.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+
+    #[command(flatten)]
+    source: SourceArgs,
+
+    /// Extra closure to browse in the viewer's "paths" tab, e.g. `./result`. Repeatable.
+    #[arg(long = "path", value_name = "PATH")]
+    paths: Vec<PathBuf>,
 
     /// When to use ANSI colors.
     #[arg(long, value_enum, default_value_t = ColorMode::Auto, global = true)]
@@ -41,43 +50,41 @@ enum Command {
         left: Option<String>,
         /// New side: a generation number, profile link, `./result`, or store path.
         right: Option<String>,
-        #[command(flatten)]
-        source: SourceArgs,
     },
     /// List generations, oldest first (`*` marks the current one).
-    List {
-        #[command(flatten)]
-        source: SourceArgs,
-    },
+    List,
 }
 
 #[derive(Args)]
 struct SourceArgs {
     /// Profile whose generations are used (with --home: the system profile to look in).
-    #[arg(long, default_value = SYSTEM_PROFILE)]
+    #[arg(long, default_value = SYSTEM_PROFILE, global = true)]
     profile: PathBuf,
 
     /// Use home-manager generations embedded in system generations (the NixOS module).
     /// Generation numbers then refer to system generations. For standalone home-manager,
     /// pass its profile with --profile instead.
-    #[arg(long)]
+    #[arg(long, global = true)]
     home: bool,
 
     /// User whose home-manager generations to use [default: $USER].
-    #[arg(long, requires = "home")]
+    #[arg(long, global = true)]
     user: Option<String>,
 }
 
 impl SourceArgs {
+    fn user(&self) -> String {
+        self.user
+            .clone()
+            .or_else(|| std::env::var("USER").ok())
+            .unwrap_or_default()
+    }
+
     fn source(&self) -> Source {
         if self.home {
             Source::Home {
                 system_profile: self.profile.clone(),
-                user: self
-                    .user
-                    .clone()
-                    .or_else(|| std::env::var("USER").ok())
-                    .unwrap_or_default(),
+                user: self.user(),
             }
         } else {
             Source::Profile(self.profile.clone())
@@ -192,19 +199,12 @@ fn run_list(source: &SourceArgs, cache: Option<&Cache>) -> Result<()> {
     emit(|out| {
         writeln!(out, "   {:>width$}  {:16}  STORE PATH", "GEN", "CREATED")?;
         for g in &gens {
-            let created = g.created.map_or_else(
-                || "?".to_owned(),
-                |t| {
-                    DateTime::<Local>::from(t)
-                        .format("%Y-%m-%d %H:%M")
-                        .to_string()
-                },
-            );
             writeln!(
                 out,
-                "{}  {:>width$}  {created:16}  {}",
+                "{}  {:>width$}  {:16}  {}",
                 if g.current { '*' } else { ' ' },
                 g.number_label(),
+                g.created_label(),
                 g.store_path,
             )?;
         }
@@ -220,11 +220,20 @@ fn main() -> Result<()> {
         .map(Cache::new);
 
     match cli.command {
-        Command::Diff {
+        Some(Command::Diff { left, right }) => run_diff(
             left,
             right,
-            source,
-        } => run_diff(left, right, &source, cache.as_ref(), cli.color.enabled()),
-        Command::List { source } => run_list(&source, cache.as_ref()),
+            &cli.source,
+            cache.as_ref(),
+            cli.color.enabled(),
+        ),
+        Some(Command::List) => run_list(&cli.source, cache.as_ref()),
+        None => ui::run(ui::Options {
+            user: cli.source.user(),
+            profile: cli.source.profile,
+            home_first: cli.source.home,
+            paths: cli.paths,
+            cache,
+        }),
     }
 }
