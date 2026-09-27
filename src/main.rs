@@ -1,5 +1,6 @@
 mod closure;
 mod diff;
+mod profile;
 mod render;
 mod store_path;
 
@@ -30,11 +31,17 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Print package-level differences between two closures (like `nvd diff`).
+    ///
+    /// With no paths, compares the profile's current generation with the one before it.
     Diff {
         /// Old side: a profile link, `./result`, or store path.
-        left: PathBuf,
+        #[arg(requires = "right")]
+        left: Option<PathBuf>,
         /// New side: a profile link, `./result`, or store path.
-        right: PathBuf,
+        right: Option<PathBuf>,
+        /// Profile whose generations are compared when no paths are given.
+        #[arg(long, default_value = profile::SYSTEM_PROFILE, conflicts_with = "left")]
+        profile: PathBuf,
     },
 }
 
@@ -63,7 +70,15 @@ fn main() -> Result<()> {
         .map(Cache::new);
 
     match cli.command {
-        Command::Diff { left, right } => {
+        Command::Diff {
+            left,
+            right,
+            profile,
+        } => {
+            let (left, right) = match (left, right) {
+                (Some(left), Some(right)) => (left, right),
+                _ => profile::previous_and_current(&profile)?,
+            };
             let left_closure = Closure::load(&left, cache.as_ref())?;
             let right_closure = Closure::load(&right, cache.as_ref())?;
             let d = diff::diff(&left_closure, &right_closure);

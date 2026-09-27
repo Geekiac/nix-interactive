@@ -2,7 +2,15 @@
 
 Interactive historical diff viewer for Nix generations (work in progress — see `plan.md`).
 
-The binary is `nixi`. So far it has a one-shot, nvd-compatible diff:
+The binary is `nixi`. So far it has a one-shot, nvd-compatible diff. With no arguments it
+compares the current system generation with the one before it (`--profile` picks another
+profile):
+
+```sh
+nix run . -- diff
+```
+
+Or compare any two closures:
 
 ```sh
 nix run . -- diff /nix/var/nix/profiles/system-42-link /nix/var/nix/profiles/system-43-link
