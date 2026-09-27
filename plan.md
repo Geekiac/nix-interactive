@@ -78,14 +78,18 @@ records what was added afterwards and where the build differs.
   `add-nix-interactive`). `flake-info` indexes it cleanly. Their criteria exclude programs
   already in nixpkgs, so the listing may be removed once the nixpkgs PR merges.
 
+- **nix-config** (`~/repos/nix-config`): `nixi` is installed from this flake (flake input
+  following nixpkgs, exposed via an overlay, listed in `home/geekiac.nix`; `d6025e5`), and
+  both hosts set `system.configurationRevision = self.rev or self.dirtyRev or null`
+  (`54002e9`), so generations built from now on get exact `=` commit links. Takes effect at
+  the next `nixos-rebuild switch`; update with `nix flake update nix-interactive`.
+
 ### Not done yet
 
 - **nixpkgs PR is still a draft.** To mark it ready: rebase onto current master, review
   `package.nix` and the maintainer entry personally, tick the "Fits CONTRIBUTING.md" and
   "Follows the automation/AI policy" boxes, and optionally note who uses it.
 - **nixos-search PR** is awaiting a maintainer's review and merge.
-- **nix-config follow-ups** (set `system.configurationRevision` for exact commit links,
-  install `nixi` from this flake) haven't been made.
 - **New releases**: tag `vX.Y.Z`, then bump `version`, `hash` and `cargoHash` in the nixpkgs
   package, or let the update bot do it after merge.
 
