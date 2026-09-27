@@ -63,7 +63,8 @@ impl Closure {
     }
 }
 
-fn resolve_store_path(target: &Path) -> Result<String> {
+/// Follows symlinks from `target` to the top-level store path it lives in.
+pub fn resolve_store_path(target: &Path) -> Result<String> {
     let resolved =
         fs::canonicalize(target).with_context(|| format!("cannot resolve {}", target.display()))?;
     let resolved = resolved
