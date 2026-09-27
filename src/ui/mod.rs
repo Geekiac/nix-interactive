@@ -8,16 +8,17 @@ mod view;
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
-use self::app::{App, Gens, Tab, TabKind};
+use self::app::{App, Gens, RepoState, Tab, TabKind};
 use self::loader::{Loader, Msg};
 use crate::closure::{resolve_store_path, Cache};
+use crate::git::Repo;
 use crate::sources::{home, profile, Generation};
 
 const WORKERS: usize = 4;
@@ -30,6 +31,8 @@ pub struct Options {
     /// Extra closures (e.g. `./result`) shown in their own tab.
     pub paths: Vec<PathBuf>,
     pub cache: Option<Cache>,
+    /// Configuration repo to link generations to commits.
+    pub repo: Option<PathBuf>,
 }
 
 fn path_generations(paths: &[PathBuf]) -> Result<Vec<Generation>> {
@@ -57,8 +60,22 @@ pub fn run(opts: Options) -> Result<()> {
         .map_or("profile".into(), |n| n.to_string_lossy().into_owned());
 
     let mut tabs = Vec::new();
+    let mut repo_state = RepoState::Unconfigured;
     match profile::generations(&opts.profile) {
         Ok(gens) => {
+            if let Some(repo) = opts.repo.clone() {
+                repo_state = RepoState::Loading;
+                let (gens, tx) = (gens.clone(), tx.clone());
+                thread::spawn(move || {
+                    let result = Repo::load(&repo)
+                        .map(|repo| {
+                            let links = repo.links(&gens);
+                            (Arc::new(repo), links)
+                        })
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Msg::Repo(result));
+                });
+            }
             // Home-manager generations need every system closure; work them out off-thread.
             let (system_gens, user, cache, tx) = (
                 gens.clone(),
@@ -96,6 +113,7 @@ pub fn run(opts: Options) -> Result<()> {
 
     let loader = Loader::new(WORKERS, opts.cache, tx);
     let mut app = App::new(tabs, active, loader);
+    app.repo = repo_state;
 
     let mut terminal = ratatui::init();
     let result = (|| -> Result<()> {

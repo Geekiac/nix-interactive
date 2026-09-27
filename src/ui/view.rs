@@ -7,14 +7,17 @@ use ratatui::widgets::{Block, Cell, Clear, List, ListItem, Paragraph, Row, Table
 use ratatui::Frame;
 
 use super::ansi;
-use super::app::{App, Category, DiffMode, Focus, Gens, Sort, TabKind};
+use super::app::{App, Category, DiffMode, Focus, Gens, RepoState, Sort, TabKind};
 use super::detail::Side;
 use super::loader::JobState;
+use crate::git::Link;
 use crate::render::{plain_versions, render_bytes};
 use crate::sources::Generation;
 use crate::store_path::{name, parse_name};
 
 const LIST_WIDTH: u16 = 52;
+/// Extra list width for the commit column.
+const LINK_WIDTH: u16 = 10;
 
 fn category_color(category: Category) -> Color {
     match category {
@@ -43,7 +46,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Length(1),
     ])
     .areas(f.area());
-    let list_width = LIST_WIDTH.min(main.width / 2);
+    let has_links = app
+        .tab()
+        .generations()
+        .iter()
+        .any(|g| app.link(g).is_some());
+    let list_width = (LIST_WIDTH + if has_links { LINK_WIDTH } else { 0 }).min(main.width / 2);
     let [list_area, diff_area] =
         Layout::horizontal([Constraint::Length(list_width), Constraint::Fill(1)]).areas(main);
 
@@ -104,6 +112,12 @@ fn describe(g: &Generation, kind: TabKind) -> String {
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::List;
     let pair = app.tab().pair();
+    let links: Vec<Option<String>> = app
+        .tab()
+        .generations()
+        .iter()
+        .map(|g| app.link(g).map(Link::label))
+        .collect();
     let tab = &mut app.tabs[app.active];
     let block = pane_block(Line::from(" Generations "), focused);
     let gens = match &tab.gens {
@@ -146,6 +160,12 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(g.created_label(), Style::new().fg(Color::DarkGray)),
                 Span::raw("  "),
                 Span::raw(describe(g, tab.kind)),
+                Span::styled(
+                    links[i]
+                        .as_ref()
+                        .map_or(String::new(), |l| format!("  {l}")),
+                    Style::new().fg(Color::Yellow),
+                ),
             ]))
         })
         .collect();
@@ -183,10 +203,10 @@ fn draw_diff(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(old.number_label(), Style::new().fg(Color::Red).bold()),
         Span::raw(" → "),
         Span::styled(new.number_label(), Style::new().fg(Color::Green).bold()),
-        Span::raw(if app.diff_mode == DiffMode::Nvd {
-            " · nvd "
-        } else {
-            " "
+        Span::raw(match app.diff_mode {
+            DiffMode::Packages => " ",
+            DiffMode::Nvd => " · nvd ",
+            DiffMode::Commits => " · commits ",
         }),
     ]);
     let block = pane_block(title, focused);
@@ -196,9 +216,22 @@ fn draw_diff(f: &mut Frame, app: &mut App, area: Rect) {
         message(f, area, block, text);
         return;
     }
+    if app.diff_mode == DiffMode::Commits {
+        let text = commits_text(app, old, new);
+        let scroll = app.text_scroll as u16;
+        app.diff_height = area.height.saturating_sub(2) as usize;
+        f.render_widget(
+            Paragraph::new(text)
+                .block(block)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0)),
+            area,
+        );
+        return;
+    }
     if app.diff_mode == DiffMode::Nvd {
         let text = job_text(app.nvd_job(), "Running nvd diff…");
-        let scroll = app.nvd_scroll as u16;
+        let scroll = app.text_scroll as u16;
         app.diff_height = area.height.saturating_sub(2) as usize;
         f.render_widget(Paragraph::new(text).block(block).scroll((scroll, 0)), area);
         return;
@@ -247,6 +280,13 @@ fn draw_diff(f: &mut Frame, app: &mut App, area: Rect) {
             }
         )),
     ];
+    if let Some((old, new)) = app.pair_links() {
+        summary.push(Span::raw("  commits "));
+        summary.push(Span::styled(
+            format!("{} → {}", old.label(), new.label()),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
     if !app.filter.is_empty() {
         summary.push(Span::styled(
             format!("  filter: {}", app.filter),
@@ -367,6 +407,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             hint(" sort  "),
             key("n"),
             hint(" nvd  "),
+            key("L"),
+            hint(" commits  "),
             key("udcarb"),
             hint(" toggle  "),
             key("?"),
@@ -376,6 +418,60 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         ])
     };
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// The commits view: which commit each side came from, then `git log` between them.
+fn commits_text(app: &App, old: &Generation, new: &Generation) -> Text<'static> {
+    let dim = |s: &str| Text::from(s.to_owned()).fg(Color::DarkGray);
+    if app.tab().kind == TabKind::Paths {
+        return dim("Ad-hoc paths aren't linked to commits.");
+    }
+    match &app.repo {
+        RepoState::Unconfigured => {
+            return dim(
+                "No configuration repo. Start nixi with --repo PATH (or set NIXI_REPO) \
+                 to link generations to commits.",
+            )
+        }
+        RepoState::Loading => return dim("Reading git history…"),
+        RepoState::Failed(e) => return Text::from(e.clone()).fg(Color::Red),
+        RepoState::Ready { .. } => {}
+    }
+    let (Some(old_link), Some(new_link)) = (app.link(old), app.link(new)) else {
+        return dim("No commit was made before one of these generations.");
+    };
+    let width = old.number_label().len().max(new.number_label().len());
+    let side = |heading: &str, color: Color, g: &Generation, link: &Link| {
+        Line::from(vec![
+            Span::styled(
+                format!("{heading} {:>width$}", g.number_label()),
+                Style::new().fg(color).bold(),
+            ),
+            Span::raw("  "),
+            Span::styled(link.label(), Style::new().fg(Color::Yellow)),
+            Span::raw(format!(" {}", link.commit.subject)),
+        ])
+    };
+    let mut lines = vec![
+        side("old", Color::Red, old, old_link),
+        side("new", Color::Green, new, new_link),
+        Line::from("= recorded   ≈ newest commit before, same nixpkgs   ? newest commit before")
+            .fg(Color::DarkGray),
+    ];
+    if old_link.commit.hash == new_link.commit.hash {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(
+            "Both come from the same commit: the difference is from outside the repo's \
+             history (uncommitted edits, or other inputs).",
+        ));
+        return Text::from(lines);
+    }
+    if old_link.commit.time > new_link.commit.time {
+        lines.push(Line::from("Going back in time: these commits are undone.").fg(Color::Yellow));
+    }
+    lines.push(Line::raw(""));
+    lines.extend(job_text(app.commits_job(), "Running git log…").lines);
+    Text::from(lines)
 }
 
 /// A rectangle of the given percentage size, centered in `area`.
@@ -522,6 +618,7 @@ fn draw_help(f: &mut Frame) {
         ("", "diff: package details: store paths, what requires it"),
         ("w", "diff: why-depends for the package (in details too)"),
         ("n", "switch the diff pane to nvd's output and back"),
+        ("L", "show config commits between the two (--repo)"),
         ("esc", "clear the filter, else unpin both sides"),
         ("", "unpinned: new = cursor, old = the generation before it"),
         ("/", "filter packages by name"),
@@ -623,6 +720,56 @@ mod tests {
         assert!(s.contains("system 42 → 43 · nvd"), "{s}");
         assert!(s.contains("Version changes:"), "{s}");
         assert!(s.contains("[U*]  #1  firefox"), "{s}");
+    }
+
+    #[test]
+    fn draws_commits_view() {
+        use crate::git::{Commit, Confidence, Link, Repo};
+        use crate::ui::app::RepoState;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+        assert!(screen(&mut app).contains("No configuration repo"));
+
+        let commit = |hash: &str, time, subject: &str| Commit {
+            hash: hash.into(),
+            time,
+            subject: subject.into(),
+            nixpkgs: None,
+        };
+        let (a, b) = (
+            commit("aaaaaaa111", 100, "Flake Update"),
+            commit("bbbbbbb222", 200, "Add ripgrep"),
+        );
+        let link = |c: &Commit| Link {
+            commit: c.clone(),
+            confidence: Confidence::Likely,
+        };
+        let links = HashMap::from([(41, link(&a)), (42, link(&a)), (43, link(&b))]);
+        app.repo = RepoState::Ready {
+            repo: Arc::new(Repo {
+                path: "/nonexistent".into(),
+                commits: vec![b.clone(), a.clone()],
+            }),
+            links,
+        };
+        app.sync();
+        let s = screen(&mut app);
+        assert!(s.contains("system 42 → 43 · commits"), "{s}");
+        assert!(s.contains("old 42  ≈aaaaaaa Flake Update"), "{s}");
+        assert!(s.contains("new 43  ≈bbbbbbb Add ripgrep"), "{s}");
+        assert!(s.contains("≈aaaaaaa"), "list shows links: {s}");
+
+        // 41 and 42 share a commit.
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert!(screen(&mut app).contains("Both come from the same commit"));
+
+        // Packages view summarizes the link range.
+        app.on_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(screen(&mut app).contains("commits ≈aaaaaaa → ≈bbbbbbb"));
     }
 
     #[test]

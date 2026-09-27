@@ -10,6 +10,7 @@ use super::detail::Detail;
 use super::loader::{JobKey, JobState, Loader, Msg};
 use crate::closure::Closure;
 use crate::diff::{self, ChangeKind, ClosureDiff, PackageEntry, Selection};
+use crate::git::{Link, Repo};
 use crate::sources::Generation;
 use crate::store_path::Version;
 
@@ -244,6 +245,23 @@ pub enum DiffMode {
     Packages,
     /// `nvd diff`'s own output.
     Nvd,
+    /// Configuration commits between the two generations.
+    Commits,
+}
+
+/// Lines the commits view shows above the `git log` output (at most).
+pub const COMMITS_HEADER_LINES: usize = 5;
+
+pub enum RepoState {
+    /// No `--repo` given.
+    Unconfigured,
+    Loading,
+    Ready {
+        repo: Arc<Repo>,
+        /// By generation number of the profile tab; home-manager tabs share these numbers.
+        links: HashMap<u64, Link>,
+    },
+    Failed(String),
 }
 
 pub struct App {
@@ -263,7 +281,9 @@ pub struct App {
     pub show_help: bool,
     pub quit: bool,
     pub diff_mode: DiffMode,
-    pub nvd_scroll: usize,
+    /// Scroll position of the text views (nvd output, commits).
+    pub text_scroll: usize,
+    pub repo: RepoState,
     /// External command runs (nvd, why-depends); kept so revisiting is instant.
     pub jobs: HashMap<JobKey, JobState>,
     pub detail: Option<Detail>,
@@ -293,7 +313,8 @@ impl App {
             show_help: false,
             quit: false,
             diff_mode: DiffMode::Packages,
-            nvd_scroll: 0,
+            text_scroll: 0,
+            repo: RepoState::Unconfigured,
             jobs: HashMap::new(),
             detail: None,
             last_pair: None,
@@ -372,7 +393,7 @@ impl App {
         self.request(&old, true);
         if self.last_pair.as_ref() != Some(&(old.clone(), new.clone())) {
             self.last_pair = Some((old.clone(), new.clone()));
-            self.nvd_scroll = 0;
+            self.text_scroll = 0;
         }
         if old != new && self.diff_mode == DiffMode::Nvd {
             let key = JobKey::Nvd {
@@ -381,6 +402,11 @@ impl App {
             };
             let args = ["--color", "always", "diff", &old_path, &new_path];
             self.run_job(key, "nvd", args.map(str::to_owned).to_vec());
+        }
+        if self.diff_mode == DiffMode::Commits {
+            if let Some((key, args)) = self.commits_job_spec() {
+                self.run_job(key, "git", args);
+            }
         }
         if old == new
             || self
@@ -411,10 +437,51 @@ impl App {
         })
     }
 
-    fn nvd_line_count(&self) -> usize {
-        match self.nvd_job() {
-            Some(JobState::Done(out)) => out.lines().count(),
-            _ => 0,
+    /// Commit link for a generation of the active tab (none for ad-hoc paths).
+    pub fn link(&self, g: &Generation) -> Option<&Link> {
+        match (&self.repo, self.tab().kind) {
+            (_, TabKind::Paths) => None,
+            (RepoState::Ready { links, .. }, _) => links.get(&g.number),
+            _ => None,
+        }
+    }
+
+    pub fn pair_links(&self) -> Option<(&Link, &Link)> {
+        let (old, new) = self.pair_paths()?;
+        Some((self.link(old)?, self.link(new)?))
+    }
+
+    /// The `git log` job for the pair on screen, when their commits differ.
+    fn commits_job_spec(&self) -> Option<(JobKey, Vec<String>)> {
+        let RepoState::Ready { repo, .. } = &self.repo else {
+            return None;
+        };
+        let (old, new) = self.pair_links()?;
+        if old.commit.hash == new.commit.hash {
+            return None;
+        }
+        let (args, _) = repo.log_args(&old.commit, &new.commit, true);
+        let key = JobKey::GitLog {
+            from: old.commit.hash.clone(),
+            to: new.commit.hash.clone(),
+        };
+        Some((key, args))
+    }
+
+    pub fn commits_job(&self) -> Option<&JobState> {
+        self.jobs.get(&self.commits_job_spec()?.0)
+    }
+
+    /// Lines in the current text view, for scrolling.
+    fn text_line_count(&self) -> usize {
+        let (job, header) = match self.diff_mode {
+            DiffMode::Nvd => (self.nvd_job(), 0),
+            DiffMode::Commits => (self.commits_job(), COMMITS_HEADER_LINES),
+            DiffMode::Packages => (None, 0),
+        };
+        match job {
+            Some(JobState::Done(out)) => out.lines().count() + header,
+            _ => header,
         }
     }
 
@@ -540,6 +607,12 @@ impl App {
                     self.prefetch(i);
                 }
             }
+            Msg::Repo(result) => {
+                self.repo = match result {
+                    Ok((repo, links)) => RepoState::Ready { repo, links },
+                    Err(e) => RepoState::Failed(e),
+                };
+            }
             Msg::Job { key, result } => {
                 let state = match result {
                     Ok(out) => JobState::Done(out),
@@ -619,11 +692,18 @@ impl App {
                 let tab = self.tab_mut();
                 tab.base = (tab.base != Some(tab.cursor)).then_some(tab.cursor);
             }
-            KeyCode::Char('n') => {
-                self.diff_mode = match self.diff_mode {
-                    DiffMode::Packages => DiffMode::Nvd,
-                    DiffMode::Nvd => DiffMode::Packages,
+            KeyCode::Char(c @ ('n' | 'L')) => {
+                let mode = if c == 'n' {
+                    DiffMode::Nvd
+                } else {
+                    DiffMode::Commits
                 };
+                self.diff_mode = if self.diff_mode == mode {
+                    DiffMode::Packages
+                } else {
+                    mode
+                };
+                self.text_scroll = 0;
             }
             KeyCode::Enter if self.focus == Focus::Diff => {
                 if self.diff_mode == DiffMode::Packages {
@@ -656,11 +736,11 @@ impl App {
     }
 
     fn move_selection(&mut self, code: KeyCode) {
-        if self.focus == Focus::Diff && self.diff_mode == DiffMode::Nvd {
+        if self.focus == Focus::Diff && self.diff_mode != DiffMode::Packages {
             let page = self.diff_height.max(1);
-            let max = self.nvd_line_count().saturating_sub(page);
-            let pos = self.nvd_scroll;
-            self.nvd_scroll = match code {
+            let max = self.text_line_count().saturating_sub(page);
+            let pos = self.text_scroll;
+            self.text_scroll = match code {
                 KeyCode::Up | KeyCode::Char('k') => pos.saturating_sub(1),
                 KeyCode::Down | KeyCode::Char('j') => (pos + 1).min(max),
                 KeyCode::PageUp => pos.saturating_sub(page),
@@ -878,12 +958,12 @@ pub(crate) mod tests {
             result: Ok(output),
         });
         press(&mut app, "\tG");
-        assert_eq!(app.nvd_scroll, 20, "30 lines, 10 visible");
+        assert_eq!(app.text_scroll, 20, "30 lines, 10 visible");
         press(&mut app, "k");
-        assert_eq!(app.nvd_scroll, 19);
+        assert_eq!(app.text_scroll, 19);
         press(&mut app, "\t"); // back to the list; moving resets the scroll
         press(&mut app, "k");
-        assert_eq!(app.nvd_scroll, 0);
+        assert_eq!(app.text_scroll, 0);
     }
 
     #[test]

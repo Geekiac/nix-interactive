@@ -1,10 +1,12 @@
 mod closure;
 mod diff;
+mod git;
 mod render;
 mod sources;
 mod store_path;
 mod ui;
 
+use std::collections::HashMap;
 use std::io::{self, IsTerminal, StdoutLock, Write};
 use std::path::PathBuf;
 
@@ -12,6 +14,7 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::closure::{Cache, Closure};
+use crate::git::{Link, Repo};
 use crate::sources::{profile::SYSTEM_PROFILE, Generation, Source};
 
 /// Interactive historical diff viewer for Nix generations.
@@ -70,6 +73,10 @@ struct SourceArgs {
     /// User whose home-manager generations to use [default: $USER].
     #[arg(long, global = true)]
     user: Option<String>,
+
+    /// Git repo of your configuration (e.g. a NixOS flake), to link generations to commits.
+    #[arg(long, env = "NIXI_REPO", global = true)]
+    repo: Option<PathBuf>,
 }
 
 impl SourceArgs {
@@ -88,6 +95,16 @@ impl SourceArgs {
             }
         } else {
             Source::Profile(self.profile.clone())
+        }
+    }
+
+    /// Commit links by generation number. Home-manager generations are numbered by system
+    /// generation, so they're linked through the system profile.
+    fn links(&self, repo: &Repo, gens: &[Generation]) -> Result<HashMap<u64, Link>> {
+        if self.home {
+            Ok(repo.links(&sources::profile::generations(&self.profile)?))
+        } else {
+            Ok(repo.links(gens))
         }
     }
 
@@ -134,22 +151,45 @@ fn emit(write: impl FnOnce(&mut StdoutLock) -> io::Result<()>) -> Result<()> {
 struct Side {
     path: PathBuf,
     label: String,
+    /// Generation number, when the side is a generation (for commit links).
+    number: Option<u64>,
+}
+
+impl Side {
+    fn of(g: &Generation, source: &SourceArgs) -> Self {
+        Self {
+            path: g.path.clone(),
+            label: source.label(g),
+            number: Some(g.number),
+        }
+    }
 }
 
 fn resolve_side(arg: &str, source: &SourceArgs, gens: &[Generation]) -> Result<Side> {
     match arg.parse::<u64>() {
-        Ok(n) => {
-            let g = sources::find(gens, n)?;
-            Ok(Side {
-                path: g.path.clone(),
-                label: source.label(g),
-            })
-        }
+        Ok(n) => Ok(Side::of(sources::find(gens, n)?, source)),
         Err(_) => Ok(Side {
             path: PathBuf::from(arg),
             label: arg.to_owned(),
+            number: None,
         }),
     }
+}
+
+/// Plain-text "what changed in the config" section for two linked generations.
+fn write_commits(out: &mut impl Write, repo: &Repo, old: &Link, new: &Link) -> Result<()> {
+    writeln!(out, "Commits: {} -> {}", old.label(), new.label())?;
+    if old.commit.hash == new.commit.hash {
+        writeln!(out, "  (same commit)")?;
+        return Ok(());
+    }
+    if old.commit.time > new.commit.time {
+        writeln!(out, "  (going back in time; commits undone:)")?;
+    }
+    for subject in repo.subjects_between(&old.commit, &new.commit)? {
+        writeln!(out, "  {subject}")?;
+    }
+    Ok(())
 }
 
 fn run_diff(
@@ -173,11 +213,7 @@ fn run_diff(
         ),
         _ => {
             let (prev, cur) = sources::previous_and_current(&gens)?;
-            let side = |g: &Generation| Side {
-                path: g.path.clone(),
-                label: source.label(g),
-            };
-            (side(prev), side(cur))
+            (Side::of(prev, source), Side::of(cur, source))
         }
     };
 
@@ -185,11 +221,55 @@ fn run_diff(
         &Closure::load(&left.path, cache)?,
         &Closure::load(&right.path, cache)?,
     );
-    emit(|out| render::write_diff(out, &left.label, &right.label, &d, color))
+    let commits = match (&source.repo, left.number, right.number) {
+        (Some(repo), Some(old), Some(new)) => {
+            let repo = Repo::load(repo)?;
+            let links = source.links(&repo, &gens)?;
+            match (links.get(&old), links.get(&new)) {
+                (Some(old), Some(new)) => {
+                    let mut text = Vec::new();
+                    write_commits(&mut text, &repo, old, new)?;
+                    text
+                }
+                _ => b"Commits: no commit found before one of the generations\n".to_vec(),
+            }
+        }
+        _ => Vec::new(),
+    };
+    emit(|out| {
+        render::write_diff(out, &left.label, &right.label, &d, color)?;
+        out.write_all(&commits)
+    })
 }
 
 fn run_list(source: &SourceArgs, cache: Option<&Cache>) -> Result<()> {
     let gens = source.source().generations(cache)?;
+    let links = match &source.repo {
+        Some(repo) => source.links(&Repo::load(repo)?, &gens)?,
+        None => HashMap::new(),
+    };
+    let commit = |g: &Generation| -> String {
+        match links.get(&g.number) {
+            Some(link) => {
+                let subject: String = link.commit.subject.chars().take(40).collect();
+                format!("{} {subject}", link.label())
+            }
+            None => String::new(),
+        }
+    };
+    let commit_width = gens
+        .iter()
+        .map(|g| commit(g).chars().count())
+        .max()
+        .unwrap_or(0);
+    // The commit column (and its gap) only appears when there are links.
+    let commit_column = |text: &str| {
+        if links.is_empty() {
+            String::new()
+        } else {
+            format!("{text:commit_width$}  ")
+        }
+    };
     let width = gens
         .iter()
         .map(|g| g.number_label().len())
@@ -197,14 +277,21 @@ fn run_list(source: &SourceArgs, cache: Option<&Cache>) -> Result<()> {
         .unwrap_or(0)
         .max(3);
     emit(|out| {
-        writeln!(out, "   {:>width$}  {:16}  STORE PATH", "GEN", "CREATED")?;
+        writeln!(
+            out,
+            "   {:>width$}  {:16}  {}STORE PATH",
+            "GEN",
+            "CREATED",
+            commit_column("COMMIT")
+        )?;
         for g in &gens {
             writeln!(
                 out,
-                "{}  {:>width$}  {:16}  {}",
+                "{}  {:>width$}  {:16}  {}{}",
                 if g.current { '*' } else { ' ' },
                 g.number_label(),
                 g.created_label(),
+                commit_column(&commit(g)),
                 g.store_path,
             )?;
         }
@@ -230,6 +317,7 @@ fn main() -> Result<()> {
         Some(Command::List) => run_list(&cli.source, cache.as_ref()),
         None => ui::run(ui::Options {
             user: cli.source.user(),
+            repo: cli.source.repo.clone(),
             profile: cli.source.profile,
             home_first: cli.source.home,
             paths: cli.paths,

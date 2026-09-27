@@ -22,6 +22,32 @@ its size, and what directly requires it. `w` runs `nix why-depends` from the gen
 the selected path, showing how the package gets pulled in. `n` swaps the package table for
 `nvd diff`'s own output (the Nix package bundles nvd).
 
+### Linking generations to commits
+
+Point nixi at your configuration repo to see which commit each generation came from:
+
+```sh
+nixi --repo ~/repos/nix-config        # or export NIXI_REPO=~/repos/nix-config
+```
+
+The list gains a commit column, the diff summary shows the commit range, and `L` switches
+the diff pane to `git log --stat` between the two generations' commits. `list` and `diff`
+take `--repo` too.
+
+Links are marked by how sure they are:
+
+- `=` the generation records its commit (`system.configurationRevision`); `+` if it was
+  built from a dirty tree on top of that commit
+- `≈` the newest commit made before the generation, and its `flake.lock` pins the same
+  nixpkgs the generation was built from
+- `?` the newest commit made before the generation, unconfirmed
+
+For exact links, record the revision in your flake's NixOS configuration:
+
+```nix
+system.configurationRevision = self.rev or self.dirtyRev or null;
+```
+
 There are also one-shot commands:
 
 ```sh
