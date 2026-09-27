@@ -1,6 +1,6 @@
 [package]
 name = "nix-interactive"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Interactive historical diff viewer for Nix generations"
 license = "MIT"
@@ -14,7 +14,7 @@ path = "src/main.rs"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive", "env"] }
-ratatui = "0.30.2"
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1.6"

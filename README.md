@@ -52,6 +52,7 @@ The diff title shows the pair as a range, e.g. `system 42 → 43 (-1:0)`.
 | `1`–`9` | switch tab: system, home-manager, extra profiles, paths |
 | `space` | pin the old side to the highlighted generation (again: unpin) |
 | `enter` | in the list: pin the new side; in the diff: package details |
+| `D` | delete the highlighted generation (type its number to confirm) |
 | `:` | compare a range: `-1` (= `-1:0`), `-2:-1`, `40:43`, … (pins both sides) |
 | `esc` | clear the filter, else unpin both sides |
 | `/` | filter packages by name |
@@ -89,6 +90,7 @@ nixi diff 40:43           # generations 40 and 43, by number
 nixi diff 0:./result      # what switching to ./result would change
 nixi diff --home          # the last home-manager change
 nixi list                 # generations with dates (and commits, with --repo)
+nixi delete 38 -5         # delete generations, after typing `yes` to confirm
 nixi config               # config file location and the settings in effect
 ```
 
@@ -100,6 +102,21 @@ steps through distinct home-manager generations.
 `--profile`, `--home`, `--user` and `--repo` work with the viewer and every command.
 `--color` controls colors (`auto` by default, honoring `NO_COLOR`), and `--no-cache` skips
 the closure cache.
+
+## Deleting generations
+
+`D` in the viewer, or `nixi delete GEN...` on the command line, deletes generations of a
+profile with `nix-env --profile <profile> --delete-generations`. Generations are numbers
+or `-N` (N before the current one).
+
+- The viewer asks you to type the generation's number, and `nixi delete` asks you to type
+  `yes` (or pass `--yes`). Both show the exact command first.
+- The current generation is never deleted. Home-manager entries (part of system
+  generations) and ad-hoc paths can't be deleted either.
+- The system profile belongs to root, so `sudo` is used when the profile isn't yours; the
+  viewer steps aside so sudo can ask for your password.
+- Only the profile link goes. Run `nix-collect-garbage` afterwards to free the space. For
+  the system profile, the boot menu keeps the entry until the next `nixos-rebuild`.
 
 ## Linking generations to commits
 

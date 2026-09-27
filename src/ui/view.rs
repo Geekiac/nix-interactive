@@ -63,9 +63,74 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.detail.is_some() {
         draw_detail(f, app);
     }
+    if app.delete_confirm.is_some() {
+        draw_delete_confirm(f, app);
+    }
     if app.show_help {
         draw_help(f);
     }
+}
+
+fn draw_delete_confirm(f: &mut Frame, app: &App) {
+    let Some(c) = &app.delete_confirm else {
+        return;
+    };
+    let g = &c.generation;
+    let tab = &app.tabs[c.tab];
+    let number = g.number.to_string();
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("Delete "),
+            Span::styled(
+                format!("{} generation {number}", tab.title),
+                Style::new().fg(Color::Red).bold(),
+            ),
+            Span::raw(format!(
+                "  ({}, {})?",
+                g.created_label(),
+                describe(g, tab.kind)
+            )),
+        ]),
+        Line::from(g.store_path.clone()).fg(Color::DarkGray),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("Runs: "),
+            Span::styled(c.command.clone(), Style::new().bold()),
+        ]),
+        Line::from("Only the profile link is removed; nix-collect-garbage frees the space later."),
+    ];
+    lines.extend(
+        c.warnings
+            .iter()
+            .map(|w| Line::from(format!("Note: {w}")).fg(Color::Yellow)),
+    );
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::raw("Type "),
+        Span::styled(number, Style::new().bold()),
+        Span::raw(" and press enter to delete; esc cancels."),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("> ", Style::new().fg(Color::Red).bold()),
+        Span::raw(c.input.clone()),
+        Span::styled("█", Style::new().fg(Color::Red)),
+    ]));
+
+    // Size to the wrapped text, so a long command can't push the prompt out of view.
+    let [area] = Layout::horizontal([Constraint::Percentage(80)])
+        .flex(Flex::Center)
+        .areas(f.area());
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let rows = paragraph.line_count(area.width.saturating_sub(2));
+    let height = u16::try_from(rows + 2).unwrap_or(u16::MAX);
+    let [area] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    let block = Block::bordered()
+        .title(" Delete generation ")
+        .border_style(Style::new().fg(Color::Red));
+    f.render_widget(Clear, area);
+    f.render_widget(paragraph.block(block), area);
 }
 
 /// A job's output (ANSI colors kept), or its progress / failure as dim text.
@@ -642,6 +707,7 @@ fn draw_help(f: &mut Frame) {
             ":",
             "compare a range: -1 (= -1:0), -2:-1, 40:43 (pins both)",
         ),
+        ("D", "delete the highlighted generation (asks to confirm)"),
         (
             "space / enter",
             "pin old / new to the highlighted generation",
@@ -806,6 +872,30 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert!(screen(&mut app).contains("commits ≈aaaaaaa → ≈bbbbbbb"));
+    }
+
+    #[test]
+    fn draws_delete_confirmation() {
+        let mut app = app();
+        for c in ['k', 'D', '4'] {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let s = screen(&mut app);
+        assert!(s.contains("Delete generation"), "{s}");
+        assert!(s.contains("Delete system generation 42"), "{s}");
+        assert!(s.contains("--delete-generations 42"), "{s}");
+        assert!(s.contains("Type 42 and press enter to delete"), "{s}");
+        assert!(s.contains("> 4"), "{s}");
+
+        // In a narrow terminal the command wraps; the prompt must still be visible.
+        let mut terminal = Terminal::new(TestBackend::new(70, 30)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let narrow: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buffer[(x, y)].symbol().to_owned())
+            .collect();
+        assert!(narrow.contains("> 4"), "prompt cut off when wrapped");
     }
 
     #[test]

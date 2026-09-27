@@ -1,6 +1,7 @@
 //! TUI state and key handling, independent of drawing.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -9,6 +10,7 @@ use ratatui::widgets::{ListState, TableState};
 use super::detail::Detail;
 use super::loader::{JobKey, JobState, Loader, Msg};
 use crate::closure::Closure;
+use crate::delete;
 use crate::diff::{self, ChangeKind, ClosureDiff, PackageEntry, Selection};
 use crate::git::{Link, Repo};
 use crate::range::parse_range;
@@ -266,6 +268,26 @@ pub enum RepoState {
     Failed(String),
 }
 
+/// The `D` confirmation popup: deletion only proceeds once the generation number is typed.
+pub struct DeleteConfirm {
+    pub tab: usize,
+    pub generation: Generation,
+    pub profile: PathBuf,
+    /// The exact command that will run.
+    pub command: String,
+    pub warnings: Vec<String>,
+    pub input: String,
+}
+
+/// A confirmed deletion for the event loop to carry out with the terminal released (sudo
+/// may need to prompt for a password).
+pub struct PendingDelete {
+    pub tab: usize,
+    pub profile: PathBuf,
+    pub number: u64,
+    pub sudo: bool,
+}
+
 pub struct App {
     pub tabs: Vec<Tab>,
     pub active: usize,
@@ -282,6 +304,8 @@ pub struct App {
     pub message: Option<String>,
     /// A range to apply once the active tab's generations have loaded.
     pending_range: Option<String>,
+    pub delete_confirm: Option<DeleteConfirm>,
+    pending_delete: Option<PendingDelete>,
     /// Toggle keys of hidden categories.
     pub hidden: HashSet<char>,
     pub sort: Sort,
@@ -318,6 +342,8 @@ impl App {
             range_input: None,
             message: None,
             pending_range: None,
+            delete_confirm: None,
+            pending_delete: None,
             hidden: HashSet::from(['b']),
             sort: Sort::Name,
             diff_state: TableState::default(),
@@ -687,8 +713,104 @@ impl App {
         self.sync();
     }
 
+    /// Opens the delete confirmation for the highlighted generation, or explains why not.
+    fn start_delete(&mut self) {
+        let tab = self.tab();
+        let refusal = match tab.kind {
+            TabKind::Home => Some(
+                "home-manager generations are part of system generations; \
+                 delete the system generation instead"
+                    .to_owned(),
+            ),
+            TabKind::Paths => Some("ad-hoc paths aren't generations".to_owned()),
+            TabKind::Profile => None,
+        };
+        let Some(g) = tab.generations().get(tab.cursor).cloned() else {
+            return;
+        };
+        if let Some(reason) = refusal.or_else(|| delete::refusal(&g)) {
+            self.message = Some(format!("Can't delete: {reason}"));
+            return;
+        }
+        let Some(profile) = delete::profile_of(&g.path) else {
+            return;
+        };
+        let sudo = delete::needs_sudo(&profile);
+        self.delete_confirm = Some(DeleteConfirm {
+            tab: self.active,
+            command: delete::command_line(&profile, &[g.number], sudo).join(" "),
+            warnings: delete::warnings(&g),
+            generation: g,
+            profile,
+            input: String::new(),
+        });
+    }
+
+    fn on_delete_key(&mut self, code: KeyCode) {
+        let Some(confirm) = &mut self.delete_confirm else {
+            return;
+        };
+        match code {
+            KeyCode::Char(c) if c.is_ascii_digit() => confirm.input.push(c),
+            KeyCode::Backspace => {
+                confirm.input.pop();
+            }
+            KeyCode::Esc => {
+                self.delete_confirm = None;
+                self.message = Some("Deletion cancelled; nothing deleted.".to_owned());
+            }
+            KeyCode::Enter => {
+                let confirm = self.delete_confirm.take().expect("checked above");
+                let number = confirm.generation.number;
+                if confirm.input == number.to_string() {
+                    self.pending_delete = Some(PendingDelete {
+                        tab: confirm.tab,
+                        sudo: delete::needs_sudo(&confirm.profile),
+                        profile: confirm.profile,
+                        number,
+                    });
+                } else {
+                    self.message = Some(format!(
+                        "Typed {:?}, not {number}; nothing deleted.",
+                        confirm.input
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A confirmed deletion waiting to be run by the event loop.
+    pub fn take_pending_delete(&mut self) -> Option<PendingDelete> {
+        self.pending_delete.take()
+    }
+
+    /// Updates a tab after a deletion attempt, with its re-read generations on success.
+    pub fn deleted(&mut self, tab: usize, number: u64, result: Result<Vec<Generation>, String>) {
+        match result {
+            Ok(gens) => {
+                let t = &mut self.tabs[tab];
+                let cursor = t.cursor;
+                t.set_gens(Gens::Ready(gens));
+                t.cursor = cursor.min(t.generations().len().saturating_sub(1));
+                // Pins are indices into the old list.
+                t.base = None;
+                t.target = None;
+                self.message = Some(format!(
+                    "Deleted generation {number}. Run nix-collect-garbage to free the space."
+                ));
+            }
+            Err(e) => self.message = Some(format!("Deleting generation {number} failed: {e}")),
+        }
+        self.sync();
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
         self.message = None;
+        if self.delete_confirm.is_some() {
+            self.on_delete_key(key.code);
+            return;
+        }
         if let Some(input) = &mut self.range_input {
             match key.code {
                 KeyCode::Char(c) => input.push(c),
@@ -758,6 +880,7 @@ impl App {
                 self.focus = Focus::Diff;
             }
             KeyCode::Char(':') => self.range_input = Some(String::new()),
+            KeyCode::Char('D') => self.start_delete(),
             KeyCode::Char('s') => {
                 self.sort = match self.sort {
                     Sort::Name => Sort::Size,
@@ -1072,6 +1195,64 @@ pub(crate) mod tests {
         assert!(app.message.as_deref().unwrap().contains("nixi --path"));
         press(&mut app, ":-1:0\x1b"); // esc cancels without applying
         assert!(app.range_input.is_none());
+    }
+
+    #[test]
+    fn delete_needs_the_typed_generation_number() {
+        let mut app = app();
+        // The cursor starts on the current generation (43), which is never deletable.
+        press(&mut app, "D");
+        assert!(app.delete_confirm.is_none());
+        assert!(app.message.as_deref().unwrap().contains("current"));
+
+        press(&mut app, "kD");
+        let confirm = app.delete_confirm.as_ref().expect("confirmation open");
+        assert_eq!(confirm.generation.number, 42);
+        assert!(
+            confirm.command.ends_with("--delete-generations 42"),
+            "{}",
+            confirm.command
+        );
+        assert!(confirm.warnings.iter().any(|w| w.contains("boot menu")));
+
+        press(&mut app, "41\n"); // wrong number
+        assert!(app.take_pending_delete().is_none());
+        assert!(app.message.as_deref().unwrap().contains("nothing deleted"));
+
+        press(&mut app, "D4x2\x1b"); // letters are ignored; esc cancels
+        assert!(app.delete_confirm.is_none());
+        assert!(app.take_pending_delete().is_none());
+
+        press(&mut app, "D42\n");
+        let pending = app.take_pending_delete().expect("confirmed");
+        assert_eq!((pending.tab, pending.number), (0, 42));
+        assert!(pending.profile.ends_with("system"));
+
+        let remaining: Vec<Generation> = app.tabs[0]
+            .generations()
+            .iter()
+            .filter(|g| g.number != 42)
+            .cloned()
+            .collect();
+        app.deleted(0, 42, Ok(remaining));
+        let numbers: Vec<u64> = app.tab().generations().iter().map(|g| g.number).collect();
+        assert_eq!(numbers, [41, 43]);
+        assert_eq!(app.tab().cursor, 1);
+        assert!(app
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("Deleted generation 42"));
+    }
+
+    #[test]
+    fn delete_is_refused_outside_profile_tabs() {
+        let mut app = app();
+        let gens = app.tabs[0].generations().to_vec();
+        app.on_msg(Msg::HomeGenerations(Ok(gens)));
+        press(&mut app, "2kD");
+        assert!(app.delete_confirm.is_none());
+        assert!(app.message.as_deref().unwrap().contains("home-manager"));
     }
 
     #[test]

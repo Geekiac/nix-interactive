@@ -20,6 +20,11 @@ records what was added afterwards and where the build differs.
   the pair as a range, e.g. `system 42 → 43 (-1:0)`.
 - **Discoverability fixes**: the status bar leads with `? help` and `: range` so narrow
   terminals don't truncate them, and the help popup is one line per key and fits 20 rows.
+- **Deleting generations** (v0.2.0): `D` in the viewer (type the generation number to
+  confirm) and `nixi delete GEN...` (type `yes`, or `--yes`). Both run
+  `nix-env --delete-generations`, with `sudo` for root-owned profiles, refuse the current
+  generation, home-manager entries and ad-hoc paths, and warn about the booted generation
+  and the boot menu entry. The viewer releases the terminal so sudo can prompt.
 - **`nixi list`** subcommand, and **`nixi config`** (settings in effect; `--example` prints a
   starter config file).
 - **`CLAUDE.md`** for future agent sessions: commands, architecture, and gotchas (flakes

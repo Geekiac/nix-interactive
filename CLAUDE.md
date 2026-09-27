@@ -69,11 +69,17 @@ feeding both front ends.
   before the generation's mtime, confirmed if that commit's `flake.lock` pins the same
   nixpkgs. All `flake.lock`s are read through one `git cat-file --batch`. Links are keyed
   by generation number.
+- `delete.rs` deletes generations via `nix-env --profile P --delete-generations N` (with
+  `sudo` when the profile's directory belongs to another user, i.e. the system profile).
+  `refusal()` is the single guard (current generation, non-profile paths); the CLI
+  (`nixi delete`, type `yes`) and the TUI (`D`, type the number) both go through it.
 - `config.rs`: `~/.config/nix-interactive/config.toml`. Precedence is flag > env
   (`NIXI_REPO`) > config > default, applied in `SourceArgs::apply` in `main.rs`.
 - `main.rs` holds the clap CLI. `SourceArgs` (`--profile/--home/--user/--repo`) is
-  flattened with `global = true`, so it applies to the TUI and every subcommand. Ranges
-  need `allow_hyphen_values` so `-1` isn't parsed as a flag.
+  flattened with `global = true`, so it applies to the TUI and every subcommand. A single
+  range argument uses `allow_hyphen_values` so `-1` isn't parsed as a flag; multi-value
+  arguments (`nixi delete GEN...`) must use `allow_negative_numbers` instead, because
+  `allow_hyphen_values` there swallows later flags like `--yes`.
 
 ### TUI (`ui/`)
 
@@ -90,6 +96,10 @@ feeding both front ends.
   and recomputes `CurrentDiff` when the `(old, new)` store paths change.
 - Tabs: `[profile, home (<user>), extra profiles from config…, paths]`. Commit links for the
   home tab come from tab 0's links, since both share system generation numbers.
+- Actions that need the real terminal (deleting, where sudo may prompt) don't run inside
+  `App`: it records a `PendingDelete`, and the event loop in `ui/mod.rs` calls
+  `ratatui::restore()`, runs the command on the plain terminal, re-inits, and reports back
+  with `App::deleted`. Deleting from the system tab also recomputes the home-manager tab.
 - `detail.rs` is the package popup model, and `ansi.rs` converts `nvd --color always` SGR output to
   ratatui `Text`.
 - Colors use the terminal's 16-color palette (`Color::Red` etc.) so light and dark themes both work.
@@ -99,6 +109,9 @@ feeding both front ends.
 
 ## Conventions
 
+- Features bump the minor version, fixes the patch version, in `Cargo.toml`, `Cargo.lock`
+  and `flake.nix` together (`nixi --version` and nixpkgs' `versionCheckHook` read it). Then
+  tag `vX.Y.Z` and push the tag.
 - ratatui 0.30: import crossterm through `ratatui::crossterm`, not a separate dependency.
 - The package wrapper adds `nix`, `nvd`, `git` with `--suffix PATH`, so the user's own
   binaries win.

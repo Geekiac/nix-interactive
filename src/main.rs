@@ -1,5 +1,6 @@
 mod closure;
 mod config;
+mod delete;
 mod diff;
 mod git;
 mod range;
@@ -12,7 +13,7 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, StdoutLock, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::closure::{Cache, Closure};
@@ -87,6 +88,19 @@ enum Command {
     },
     /// List generations, oldest first (`*` marks the current one).
     List,
+    /// Delete generations of a profile, after confirmation (`nix-env --delete-generations`).
+    ///
+    /// Only the profile links are removed; run `nix-collect-garbage` afterwards to free the
+    /// space. The current generation is never deleted. The system profile needs root, so
+    /// `sudo` is used when the profile belongs to another user.
+    Delete {
+        /// Generations to delete: numbers, or `-N` for N generations before the current one.
+        #[arg(value_name = "GEN", required = true, allow_negative_numbers = true)]
+        generations: Vec<String>,
+        /// Don't ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Show the config file location and the settings in effect.
     Config {
         /// Print an example config file instead.
@@ -289,6 +303,70 @@ fn run_diff(
     })
 }
 
+fn run_delete(
+    specs: &[String],
+    yes: bool,
+    source: &SourceArgs,
+    cache: Option<&Cache>,
+) -> Result<()> {
+    if source.home {
+        bail!(
+            "home-manager generations are part of system generations; \
+             delete the system generation instead (without --home)"
+        );
+    }
+    let gens = source.source().generations(cache)?;
+    let mut targets: Vec<&Generation> = Vec::new();
+    for spec in specs {
+        let spec = SideSpec::parse(spec)?;
+        if let SideSpec::Path(path) = &spec {
+            bail!("{path} is not a generation; give generation numbers or -N");
+        }
+        let g = &gens[spec.index(&gens)?];
+        if let Some(reason) = delete::refusal(g) {
+            bail!("{reason}");
+        }
+        if !targets.iter().any(|t| t.number == g.number) {
+            targets.push(g);
+        }
+    }
+    targets.sort_by_key(|g| g.number);
+    let profile = source.profile();
+    let numbers: Vec<u64> = targets.iter().map(|g| g.number).collect();
+    let sudo = delete::needs_sudo(profile);
+
+    println!("About to delete from {}:", profile.display());
+    for g in &targets {
+        println!("  {:>4}  {}  {}", g.number, g.created_label(), g.store_path);
+    }
+    let mut warnings: Vec<String> = targets.iter().flat_map(|g| delete::warnings(g)).collect();
+    warnings.dedup();
+    for warning in &warnings {
+        println!("Note: {warning}");
+    }
+    println!("Space is freed by the next garbage collection (nix-collect-garbage).");
+    println!(
+        "Command: {}",
+        delete::command_line(profile, &numbers, sudo).join(" ")
+    );
+    if !yes {
+        print!("Type 'yes' to delete: ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        if answer.trim() != "yes" {
+            bail!("not confirmed; nothing deleted");
+        }
+    }
+    let status = delete::command(profile, &numbers, sudo).status()?;
+    if !status.success() {
+        bail!("nix-env failed ({status}); nothing more was done");
+    }
+    let list: Vec<String> = numbers.iter().map(u64::to_string).collect();
+    println!("Deleted generation(s) {}.", list.join(", "));
+    Ok(())
+}
+
 fn run_list(source: &SourceArgs, cache: Option<&Cache>) -> Result<()> {
     let gens = source.source().generations(cache)?;
     let links = match &source.repo {
@@ -381,6 +459,9 @@ fn main() -> Result<()> {
             run_diff(range, &cli.source, cache.as_ref(), cli.color.enabled())
         }
         Some(Command::List) => run_list(&cli.source, cache.as_ref()),
+        Some(Command::Delete { generations, yes }) => {
+            run_delete(&generations, yes, &cli.source, cache.as_ref())
+        }
         Some(Command::Config { example: true }) => {
             emit(|out| out.write_all(config::EXAMPLE.as_bytes()))
         }
@@ -403,6 +484,19 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_takes_relative_generations() {
+        let cli = Cli::try_parse_from(["nixi", "delete", "-3", "40", "--yes"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Delete { generations, yes: true }) if generations == ["-3", "40"]
+        ));
+        assert!(
+            Cli::try_parse_from(["nixi", "delete"]).is_err(),
+            "needs a generation"
+        );
+    }
 
     #[test]
     fn viewer_range_flag_takes_negative_values() {
