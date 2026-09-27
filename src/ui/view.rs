@@ -414,7 +414,12 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     } else {
         let key = |k: &'static str| Span::styled(k, Style::new().bold());
         let hint = |h: &'static str| Span::styled(h, Style::new().fg(Color::DarkGray));
+        // Most useful first: narrow terminals cut the end off.
         Line::from(vec![
+            key("?"),
+            hint(" help  "),
+            key(":"),
+            hint(" range  "),
             key("space"),
             hint(" pin old  "),
             key("enter"),
@@ -427,8 +432,6 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             hint(" unpin  "),
             key("tab"),
             hint(" pane  "),
-            key(":"),
-            hint(" range  "),
             key("/"),
             hint(" filter  "),
             key("s"),
@@ -439,8 +442,6 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             hint(" commits  "),
             key("udcarb"),
             hint(" toggle  "),
-            key("?"),
-            hint(" help  "),
             key("q"),
             hint(" quit"),
         ])
@@ -633,28 +634,30 @@ fn draw_detail(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_help(f: &mut Frame) {
+    // One line per key, so it fits a 20-row terminal.
     let lines = [
-        ("j/k ↑/↓", "move in the focused pane"),
-        ("g/G PgUp/PgDn", "jump to top/bottom, page"),
-        ("tab h/l ←/→", "switch pane"),
-        ("1-9", "switch tab (system, home-manager, paths)"),
+        ("j/k ↑/↓", "move; g/G top/bottom; PgUp/PgDn page"),
+        ("tab h/l ←/→", "switch pane; 1-9 switch tab"),
+        (":", "compare a range: -1:0, -2:-1, 40:43 (pins both)"),
         (
-            "space",
-            "pin the old side to this generation (again: unpin)",
+            "space / enter",
+            "pin old / new to the highlighted generation",
         ),
-        ("enter", "list: pin the new side (again: unpin)"),
-        ("", "diff: package details: store paths, what requires it"),
-        ("w", "diff: why-depends for the package (in details too)"),
-        ("n", "switch the diff pane to nvd's output and back"),
-        ("L", "show config commits between the two (--repo)"),
         ("esc", "clear the filter, else unpin both sides"),
-        ("", "unpinned: new = cursor, old = the generation before it"),
-        (":", "compare a range: -1:0 previous vs current, -2:-1,"),
-        ("", "40:43 by number (pins both sides; esc unpins)"),
+        (
+            "enter (diff)",
+            "package details: store paths, what requires it",
+        ),
+        ("w", "why-depends for the selected package"),
+        ("n", "nvd's own output instead of the table"),
+        ("L", "config commits between the two (needs --repo)"),
         ("/", "filter packages by name"),
         ("s", "sort by name or by size change"),
-        ("u d c a r b", "show/hide upgraded, downgraded, changed,"),
-        ("", "added, removed, rebuilt (hidden by default)"),
+        (
+            "u d c a r b",
+            "show/hide upgraded, downgraded, changed, added,",
+        ),
+        ("", "removed, rebuilt (rebuilt hidden by default)"),
         ("q ctrl-c", "quit"),
     ];
     let text: Vec<Line> = lines
