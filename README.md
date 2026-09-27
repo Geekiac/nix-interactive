@@ -17,6 +17,11 @@ side for arbitrary comparisons, `/` filters packages, `s` sorts by size change,
 `u d c a r b` show or hide upgraded, downgraded, changed, added, removed and rebuilt
 packages, and `?` lists every key. Closures load in the background, newest first.
 
+In the diff pane, `enter` opens a package's details: every store path on each side with
+its size, and what directly requires it. `w` runs `nix why-depends` from the generation to
+the selected path, showing how the package gets pulled in. `n` swaps the package table for
+`nvd diff`'s own output (the Nix package bundles nvd).
+
 There are also one-shot commands:
 
 ```sh

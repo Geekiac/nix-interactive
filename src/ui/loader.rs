@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -18,6 +19,24 @@ pub enum Msg {
     },
     /// Embedded home-manager generations, computed once system closures are loaded.
     HomeGenerations(Result<Vec<Generation>, String>),
+    /// A finished external command: its stdout, or why it failed.
+    Job {
+        key: JobKey,
+        result: Result<String, String>,
+    },
+}
+
+/// External commands the UI runs, keyed by the store paths they're about.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum JobKey {
+    Nvd { old: String, new: String },
+    WhyDepends { root: String, path: String },
+}
+
+pub enum JobState {
+    Running,
+    Done(String),
+    Failed(String),
 }
 
 #[derive(Default)]
@@ -28,6 +47,7 @@ struct Queue {
 
 pub struct Loader {
     queue: Arc<Queue>,
+    tx: Sender<Msg>,
 }
 
 impl Loader {
@@ -54,7 +74,29 @@ impl Loader {
                 }
             });
         }
-        Self { queue }
+        Self { queue, tx }
+    }
+
+    /// Runs `program args` on its own thread and reports back as [`Msg::Job`].
+    pub fn spawn_job(&self, key: JobKey, program: &str, args: Vec<String>) {
+        let (tx, program) = (self.tx.clone(), program.to_owned());
+        thread::spawn(move || {
+            let result = match Command::new(&program).args(&args).output() {
+                Err(e) => Err(format!("couldn't run {program}: {e}")),
+                Ok(out) if out.status.success() => {
+                    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    Err(format!(
+                        "{program} failed ({}): {}",
+                        out.status,
+                        stderr.trim()
+                    ))
+                }
+            };
+            let _ = tx.send(Msg::Job { key, result });
+        });
     }
 
     /// Queues a load at the back. Callers track what they've requested; each call loads once.

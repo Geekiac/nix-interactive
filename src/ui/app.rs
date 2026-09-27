@@ -6,7 +6,8 @@ use std::sync::Arc;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
 
-use super::loader::{Loader, Msg};
+use super::detail::Detail;
+use super::loader::{JobKey, JobState, Loader, Msg};
 use crate::closure::Closure;
 use crate::diff::{self, ChangeKind, ClosureDiff, PackageEntry, Selection};
 use crate::sources::Generation;
@@ -237,6 +238,14 @@ pub enum Sort {
     Size,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffMode {
+    /// Our package table.
+    Packages,
+    /// `nvd diff`'s own output.
+    Nvd,
+}
+
 pub struct App {
     pub tabs: Vec<Tab>,
     pub active: usize,
@@ -253,6 +262,13 @@ pub struct App {
     pub diff_state: TableState,
     pub show_help: bool,
     pub quit: bool,
+    pub diff_mode: DiffMode,
+    pub nvd_scroll: usize,
+    /// External command runs (nvd, why-depends); kept so revisiting is instant.
+    pub jobs: HashMap<JobKey, JobState>,
+    pub detail: Option<Detail>,
+    /// The `(old, new)` store paths last on screen, to reset scrolling when they change.
+    last_pair: Option<(String, String)>,
     /// Rows visible in each pane at the last draw, for page up/down.
     pub list_height: usize,
     pub diff_height: usize,
@@ -276,6 +292,11 @@ impl App {
             diff_state: TableState::default(),
             show_help: false,
             quit: false,
+            diff_mode: DiffMode::Packages,
+            nvd_scroll: 0,
+            jobs: HashMap::new(),
+            detail: None,
+            last_pair: None,
             list_height: 10,
             diff_height: 10,
             loader,
@@ -328,16 +349,39 @@ impl App {
         Some((gens.get(old)?, gens.get(new)?))
     }
 
+    fn run_job(&mut self, key: JobKey, program: &str, args: Vec<String>) {
+        if !self.jobs.contains_key(&key) {
+            self.jobs.insert(key.clone(), JobState::Running);
+            self.loader.spawn_job(key, program, args);
+        }
+    }
+
     /// Loads what the screen needs and recomputes the diff when the pair changed.
     pub fn sync(&mut self) {
-        let Some((old, new)) = self
-            .pair_paths()
-            .map(|(o, n)| (o.store_path.clone(), n.store_path.clone()))
-        else {
+        let Some((old, new, old_path, new_path)) = self.pair_paths().map(|(o, n)| {
+            (
+                o.store_path.clone(),
+                n.store_path.clone(),
+                o.path.display().to_string(),
+                n.path.display().to_string(),
+            )
+        }) else {
             return;
         };
         self.request(&new, true);
         self.request(&old, true);
+        if self.last_pair.as_ref() != Some(&(old.clone(), new.clone())) {
+            self.last_pair = Some((old.clone(), new.clone()));
+            self.nvd_scroll = 0;
+        }
+        if old != new && self.diff_mode == DiffMode::Nvd {
+            let key = JobKey::Nvd {
+                old: old.clone(),
+                new: new.clone(),
+            };
+            let args = ["--color", "always", "diff", &old_path, &new_path];
+            self.run_job(key, "nvd", args.map(str::to_owned).to_vec());
+        }
         if old == new
             || self
                 .current
@@ -355,6 +399,91 @@ impl App {
                 rows,
             });
             self.select_first_row();
+        }
+    }
+
+    /// The `nvd diff` run for the pair on screen, if started.
+    pub fn nvd_job(&self) -> Option<&JobState> {
+        let (old, new) = self.pair_paths()?;
+        self.jobs.get(&JobKey::Nvd {
+            old: old.store_path.clone(),
+            new: new.store_path.clone(),
+        })
+    }
+
+    fn nvd_line_count(&self) -> usize {
+        match self.nvd_job() {
+            Some(JobState::Done(out)) => out.lines().count(),
+            _ => 0,
+        }
+    }
+
+    /// The `nix why-depends` run shown in the detail popup, if any.
+    pub fn why_job(&self) -> Option<&JobState> {
+        let (root, path) = self.detail.as_ref()?.why.clone()?;
+        self.jobs.get(&JobKey::WhyDepends { root, path })
+    }
+
+    fn open_detail(&mut self) {
+        let Some(row) = self
+            .diff_state
+            .selected()
+            .and_then(|i| self.visible_rows().get(i).map(|r| (*r).clone()))
+        else {
+            return;
+        };
+        let Some((old, new)) = self.pair_paths() else {
+            return;
+        };
+        let (Some(left), Some(right)) = (
+            self.closures.get(&old.store_path),
+            self.closures.get(&new.store_path),
+        ) else {
+            return;
+        };
+        let title = &self.tab().title;
+        let detail = Detail::new(&row, (old, new), (left, right), |g| {
+            format!("{title} {}", g.number_label())
+        });
+        self.detail = Some(detail);
+    }
+
+    /// Runs `nix why-depends` from the selected path's generation to that path.
+    fn why_depends(&mut self) {
+        let Some(detail) = &mut self.detail else {
+            return;
+        };
+        let Some(selected) = detail.selected() else {
+            return;
+        };
+        let (root, path) = (detail.root(selected.side).to_owned(), selected.path.clone());
+        detail.why = Some((root.clone(), path.clone()));
+        detail.jump_to_why = true;
+        let args = [
+            "--extra-experimental-features",
+            "nix-command",
+            "why-depends",
+            &root,
+            &path,
+        ];
+        let args = args.map(str::to_owned).to_vec();
+        self.run_job(JobKey::WhyDepends { root, path }, "nix", args);
+    }
+
+    fn on_detail_key(&mut self, code: KeyCode) {
+        let Some(detail) = &mut self.detail else {
+            return;
+        };
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => self.detail = None,
+            KeyCode::Up | KeyCode::Char('k') => detail.cursor = detail.cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                detail.cursor = (detail.cursor + 1).min(detail.paths.len().saturating_sub(1));
+            }
+            KeyCode::PageUp => detail.scroll = detail.scroll.saturating_sub(10),
+            KeyCode::PageDown => detail.scroll = detail.scroll.saturating_add(10),
+            KeyCode::Char('w') => self.why_depends(),
+            _ => {}
         }
     }
 
@@ -411,6 +540,13 @@ impl App {
                     self.prefetch(i);
                 }
             }
+            Msg::Job { key, result } => {
+                let state = match result {
+                    Ok(out) => JobState::Done(out),
+                    Err(e) => JobState::Failed(e),
+                };
+                self.jobs.insert(key, state);
+            }
         }
         self.sync();
     }
@@ -434,6 +570,10 @@ impl App {
         }
         if self.show_help {
             self.show_help = false;
+            return;
+        }
+        if self.detail.is_some() {
+            self.on_detail_key(key.code);
             return;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -479,6 +619,23 @@ impl App {
                 let tab = self.tab_mut();
                 tab.base = (tab.base != Some(tab.cursor)).then_some(tab.cursor);
             }
+            KeyCode::Char('n') => {
+                self.diff_mode = match self.diff_mode {
+                    DiffMode::Packages => DiffMode::Nvd,
+                    DiffMode::Nvd => DiffMode::Packages,
+                };
+            }
+            KeyCode::Enter if self.focus == Focus::Diff => {
+                if self.diff_mode == DiffMode::Packages {
+                    self.open_detail();
+                }
+            }
+            KeyCode::Char('w') if self.focus == Focus::Diff => {
+                if self.diff_mode == DiffMode::Packages {
+                    self.open_detail();
+                    self.why_depends();
+                }
+            }
             KeyCode::Enter => {
                 let tab = self.tab_mut();
                 tab.target = (tab.target != Some(tab.cursor)).then_some(tab.cursor);
@@ -499,6 +656,21 @@ impl App {
     }
 
     fn move_selection(&mut self, code: KeyCode) {
+        if self.focus == Focus::Diff && self.diff_mode == DiffMode::Nvd {
+            let page = self.diff_height.max(1);
+            let max = self.nvd_line_count().saturating_sub(page);
+            let pos = self.nvd_scroll;
+            self.nvd_scroll = match code {
+                KeyCode::Up | KeyCode::Char('k') => pos.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => (pos + 1).min(max),
+                KeyCode::PageUp => pos.saturating_sub(page),
+                KeyCode::PageDown => (pos + page).min(max),
+                KeyCode::Home | KeyCode::Char('g') => 0,
+                KeyCode::End | KeyCode::Char('G') => max,
+                _ => return,
+            };
+            return;
+        }
         let (len, page, pos) = match self.focus {
             Focus::List => (
                 self.tab().generations().len(),
@@ -536,6 +708,7 @@ impl App {
 pub(crate) mod tests {
     use super::*;
     use crate::closure::PathInfo;
+    use crate::ui::detail::Side;
     use std::path::PathBuf;
     use std::sync::mpsc;
 
@@ -660,6 +833,57 @@ pub(crate) mod tests {
         );
         press(&mut app, "\x1b");
         assert_eq!(app.tab().pair(), Some((1, 2)));
+    }
+
+    #[test]
+    fn detail_popup_shows_paths_and_referrers() {
+        let mut app = app();
+        press(&mut app, "\t\n"); // focus the diff, open the first row (firefox)
+        let detail = app.detail.as_ref().expect("detail open");
+        assert_eq!(detail.row.pname, "firefox");
+        let paths: Vec<(Side, &str)> = detail
+            .paths
+            .iter()
+            .map(|p| (p.side, p.path.as_str()))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                (Side::Old, "/nix/store/a2-firefox-141.0"),
+                (Side::New, "/nix/store/a3-firefox-141.0.2")
+            ]
+        );
+        assert_eq!(detail.cursor, 1, "starts on the new side");
+        assert_eq!(detail.referrers, ["nixos-system"]);
+        assert_eq!(detail.selected_on(), (true, true));
+        press(&mut app, "k\x1b");
+        assert!(app.detail.is_none());
+
+        press(&mut app, "j\n"); // htop, removed: referrers come from the old side
+        let detail = app.detail.as_ref().expect("detail open");
+        assert_eq!(detail.row.pname, "htop");
+        assert_eq!(detail.referrers_side, Side::Old);
+        assert_eq!(detail.paths.len(), 1);
+    }
+
+    #[test]
+    fn nvd_mode_tracks_the_job() {
+        let mut app = app();
+        press(&mut app, "n");
+        assert!(matches!(app.nvd_job(), Some(JobState::Running)));
+        let (old, new) = app.last_pair.clone().unwrap();
+        let output: String = (0..30).map(|i| format!("line {i}\n")).collect();
+        app.on_msg(Msg::Job {
+            key: JobKey::Nvd { old, new },
+            result: Ok(output),
+        });
+        press(&mut app, "\tG");
+        assert_eq!(app.nvd_scroll, 20, "30 lines, 10 visible");
+        press(&mut app, "k");
+        assert_eq!(app.nvd_scroll, 19);
+        press(&mut app, "\t"); // back to the list; moving resets the scroll
+        press(&mut app, "k");
+        assert_eq!(app.nvd_scroll, 0);
     }
 
     #[test]

@@ -31,7 +31,7 @@
           nativeBuildInputs = [ pkgs.makeWrapper ];
           # --suffix so a system-installed nix (matching the daemon) wins over the bundled one.
           postInstall = ''
-            wrapProgram $out/bin/nixi --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.nix ]}
+            wrapProgram $out/bin/nixi --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.nix pkgs.nvd ]}
           '';
           meta = {
             description = "Interactive historical diff viewer for Nix generations";

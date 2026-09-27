@@ -2,14 +2,17 @@
 
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Clear, List, ListItem, Paragraph, Row, Table, Tabs, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Category, Focus, Gens, Sort, TabKind};
+use super::ansi;
+use super::app::{App, Category, DiffMode, Focus, Gens, Sort, TabKind};
+use super::detail::Side;
+use super::loader::JobState;
 use crate::render::{plain_versions, render_bytes};
 use crate::sources::Generation;
-use crate::store_path::parse_name;
+use crate::store_path::{name, parse_name};
 
 const LIST_WIDTH: u16 = 52;
 
@@ -48,8 +51,20 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_list(f, app, list_area);
     draw_diff(f, app, diff_area);
     draw_status(f, app, status);
+    if app.detail.is_some() {
+        draw_detail(f, app);
+    }
     if app.show_help {
         draw_help(f);
+    }
+}
+
+/// A job's output (ANSI colors kept), or its progress / failure as dim text.
+fn job_text(job: Option<&JobState>, running: &str) -> Text<'static> {
+    match job {
+        Some(JobState::Done(out)) => ansi::to_text(out),
+        Some(JobState::Failed(e)) => Text::from(e.clone()).fg(Color::Red),
+        Some(JobState::Running) | None => Text::from(running.to_owned()).fg(Color::DarkGray),
     }
 }
 
@@ -168,13 +183,24 @@ fn draw_diff(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(old.number_label(), Style::new().fg(Color::Red).bold()),
         Span::raw(" → "),
         Span::styled(new.number_label(), Style::new().fg(Color::Green).bold()),
-        Span::raw(" "),
+        Span::raw(if app.diff_mode == DiffMode::Nvd {
+            " · nvd "
+        } else {
+            " "
+        }),
     ]);
     let block = pane_block(title, focused);
 
     if old.store_path == new.store_path {
         let text = "Old and new are the same closure.".to_owned();
         message(f, area, block, text);
+        return;
+    }
+    if app.diff_mode == DiffMode::Nvd {
+        let text = job_text(app.nvd_job(), "Running nvd diff…");
+        let scroll = app.nvd_scroll as u16;
+        app.diff_height = area.height.saturating_sub(2) as usize;
+        f.render_widget(Paragraph::new(text).block(block).scroll((scroll, 0)), area);
         return;
     }
     for g in [old, new] {
@@ -326,7 +352,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             key("space"),
             hint(" pin old  "),
             key("enter"),
-            hint(" pin new  "),
+            hint(if app.focus == Focus::Diff {
+                " details  "
+            } else {
+                " pin new  "
+            }),
             key("esc"),
             hint(" unpin  "),
             key("tab"),
@@ -335,6 +365,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             hint(" filter  "),
             key("s"),
             hint(" sort  "),
+            key("n"),
+            hint(" nvd  "),
             key("udcarb"),
             hint(" toggle  "),
             key("?"),
@@ -344,6 +376,136 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         ])
     };
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// A rectangle of the given percentage size, centered in `area`.
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let [area] = Layout::horizontal([Constraint::Percentage(width)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [area] = Layout::vertical([Constraint::Percentage(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    area
+}
+
+fn draw_detail(f: &mut Frame, app: &mut App) {
+    let Some(d) = &app.detail else {
+        return;
+    };
+    let version_width = d
+        .paths
+        .iter()
+        .map(|p| p.version.to_string().chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(8, 40);
+    let row = &d.row;
+    let color = category_color(row.category);
+    let (old_selected, new_selected) = d.selected_on();
+    let yes_no = |b: bool| if b { "yes" } else { "no" };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{}{} ", row.category.marker(), row.selection.marker()),
+                Style::new().fg(color).bold(),
+            ),
+            Span::styled(row.category.name(), Style::new().fg(color)),
+            Span::raw(format!(
+                "   size {}   directly selected: old {}, new {}",
+                render_bytes(i128::from(row.size_delta)),
+                yes_no(old_selected),
+                yes_no(new_selected),
+            )),
+        ]),
+        Line::raw(""),
+    ];
+    for (side, label, heading, heading_color) in [
+        (Side::Old, &d.old_label, "Old", Color::Red),
+        (Side::New, &d.new_label, "New", Color::Green),
+    ] {
+        lines.push(Line::styled(
+            format!("{heading} — {label}"),
+            Style::new().fg(heading_color).bold(),
+        ));
+        let mut present = false;
+        for (i, p) in d.paths.iter().enumerate().filter(|(_, p)| p.side == side) {
+            present = true;
+            let size = render_bytes(i128::from(p.nar_size));
+            let line = Line::from(vec![
+                Span::raw(if i == d.cursor { "▸ " } else { "  " }),
+                Span::styled(
+                    format!("{:<version_width$}", p.version.to_string()),
+                    Style::new().fg(Color::Yellow),
+                ),
+                Span::raw(format!(" {:>9}  ", size.trim_start_matches('+'))),
+                Span::raw(p.path.clone()),
+            ]);
+            lines.push(if i == d.cursor {
+                line.style(Style::new().add_modifier(Modifier::REVERSED))
+            } else {
+                line
+            });
+        }
+        if !present {
+            lines.push(Line::from("  (not in this closure)").fg(Color::DarkGray));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    let side = match d.referrers_side {
+        Side::Old => "old",
+        Side::New => "new",
+    };
+    lines.push(Line::styled(
+        format!("Directly required by ({}, {side} side)", d.referrers.len()),
+        Style::new().bold(),
+    ));
+    lines.push(if d.referrers.is_empty() {
+        Line::from("  nothing: it's the root").fg(Color::DarkGray)
+    } else {
+        Line::from(format!("  {}", d.referrers.join(", ")))
+    });
+
+    lines.push(Line::raw(""));
+    let why_line = lines.len() as u16;
+    match &d.why {
+        None => lines.push(
+            Line::from("Press w to run nix why-depends on the selected path.").fg(Color::DarkGray),
+        ),
+        Some((root, path)) => {
+            lines.push(Line::styled(
+                format!("nix why-depends {} {}", name(root), name(path)),
+                Style::new().bold(),
+            ));
+            lines.extend(job_text(app.why_job(), "Running…").lines);
+        }
+    }
+
+    let block = Block::bordered()
+        .title(format!(" {} ", row.pname))
+        .title_bottom(
+            Line::from(" j/k select path · w why-depends · PgUp/PgDn scroll · esc close ")
+                .right_aligned(),
+        )
+        .border_style(Style::new().fg(Color::Blue));
+    let Some(d) = &mut app.detail else {
+        return;
+    };
+    if d.jump_to_why {
+        // Approximate when earlier lines wrap; PgUp/PgDn cover the rest.
+        d.scroll = why_line;
+        d.jump_to_why = false;
+    }
+    let area = centered(f.area(), 90, 80);
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((d.scroll, 0)),
+        area,
+    );
 }
 
 fn draw_help(f: &mut Frame) {
@@ -356,10 +518,10 @@ fn draw_help(f: &mut Frame) {
             "space",
             "pin the old side to this generation (again: unpin)",
         ),
-        (
-            "enter",
-            "pin the new side to this generation (again: unpin)",
-        ),
+        ("enter", "list: pin the new side (again: unpin)"),
+        ("", "diff: package details: store paths, what requires it"),
+        ("w", "diff: why-depends for the package (in details too)"),
+        ("n", "switch the diff pane to nvd's output and back"),
         ("esc", "clear the filter, else unpin both sides"),
         ("", "unpinned: new = cursor, old = the generation before it"),
         ("/", "filter packages by name"),
@@ -394,7 +556,9 @@ fn draw_help(f: &mut Frame) {
 mod tests {
     use super::*;
     use crate::ui::app::tests::app;
+    use crate::ui::loader::{JobKey, Msg};
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
 
     fn screen(app: &mut App) -> String {
@@ -426,6 +590,39 @@ mod tests {
         assert!(s.contains("141.0.2"), "{s}");
         assert!(s.contains("R- htop"), "{s}");
         assert!(s.contains("-20.5KiB"), "{s}");
+    }
+
+    #[test]
+    fn draws_detail_popup() {
+        let mut app = app();
+        app.focus = Focus::Diff;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let s = screen(&mut app);
+        assert!(s.contains(" firefox "), "{s}");
+        assert!(s.contains("Old — system 42"), "{s}");
+        assert!(s.contains("▸ 141.0.2"), "{s}");
+        assert!(s.contains("Directly required by (1, new side)"), "{s}");
+        assert!(s.contains("nixos-system"), "{s}");
+        assert!(s.contains("Press w"), "{s}");
+    }
+
+    #[test]
+    fn draws_nvd_output() {
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(screen(&mut app).contains("Running nvd diff…"));
+        let (old, new) = app
+            .pair_paths()
+            .map(|(o, n)| (o.store_path.clone(), n.store_path.clone()))
+            .unwrap();
+        app.on_msg(Msg::Job {
+            key: JobKey::Nvd { old, new },
+            result: Ok("\x1b[1mVersion changes:\x1b[0m\n[U*]  #1  firefox".into()),
+        });
+        let s = screen(&mut app);
+        assert!(s.contains("system 42 → 43 · nvd"), "{s}");
+        assert!(s.contains("Version changes:"), "{s}");
+        assert!(s.contains("[U*]  #1  firefox"), "{s}");
     }
 
     #[test]

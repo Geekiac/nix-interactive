@@ -1,6 +1,8 @@
 //! The interactive terminal UI (`nixi` with no subcommand).
 
+mod ansi;
 mod app;
+mod detail;
 mod loader;
 mod view;
 

@@ -18,11 +18,16 @@ pub fn base_path(path: &str) -> Option<&str> {
     Some(&path[..end])
 }
 
+/// The name part of a store path, after the hash (`/nix/store/<hash>-foo-1.0` -> `foo-1.0`).
+pub fn name(path: &str) -> &str {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    file.split_once('-').map_or(file, |(_, name)| name)
+}
+
 /// Splits a store path into `(pname, version)` the way nvd does: the name after the hash
 /// is cut at the first `-` that is followed by a digit.
 pub fn parse_name(path: &str) -> (&str, Option<&str>) {
-    let file = path.rsplit('/').next().unwrap_or(path);
-    let name = file.split_once('-').map_or(file, |(_, name)| name);
+    let name = name(path);
     let name = match name.strip_suffix(".drv") {
         Some(stripped) if !stripped.is_empty() => stripped,
         _ => name,
