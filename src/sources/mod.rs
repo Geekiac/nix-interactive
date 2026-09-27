@@ -74,26 +74,25 @@ impl Source {
     }
 }
 
-/// The generation numbered `n`; for embedded home-manager, the one system generation `n` used.
-pub fn find(gens: &[Generation], n: u64) -> Result<&Generation> {
+/// Index of the generation numbered `n`; for embedded home-manager, the one system
+/// generation `n` used.
+pub fn position(gens: &[Generation], n: u64) -> Result<usize> {
     gens.iter()
-        .find(|g| g.covers(n))
+        .position(|g| g.covers(n))
         .with_context(|| format!("no generation {n}"))
 }
 
-/// The generation `back` steps before the current one (0 = current). Steps follow the list,
-/// so they skip numbers removed by garbage collection.
-pub fn relative(gens: &[Generation], back: u64) -> Result<&Generation> {
-    let pos = gens
+/// Index of the generation `back` steps before the current one (0 = current). Steps follow
+/// the list, so they skip numbers removed by garbage collection.
+pub fn back_from_current(gens: &[Generation], back: u64) -> Result<usize> {
+    let current = gens
         .iter()
         .position(|g| g.current)
-        .context("no current generation")?;
-    let before = pos;
+        .context("no current generation to count back from")?;
     usize::try_from(back)
         .ok()
-        .and_then(|back| pos.checked_sub(back))
-        .map(|i| &gens[i])
+        .and_then(|back| current.checked_sub(back))
         .with_context(|| {
-            format!("can't go back {back}: only {before} generation(s) before the current one")
+            format!("can't go back {back}: only {current} generation(s) before the current one")
         })
 }

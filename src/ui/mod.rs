@@ -36,6 +36,8 @@ pub struct Options {
     pub cache: Option<Cache>,
     /// Configuration repo to link generations to commits.
     pub repo: Option<PathBuf>,
+    /// `OLD:NEW` range to open on.
+    pub range: Option<String>,
 }
 
 fn path_generations(paths: &[PathBuf]) -> Result<Vec<Generation>> {
@@ -122,6 +124,9 @@ pub fn run(opts: Options) -> Result<()> {
     let loader = Loader::new(WORKERS, opts.cache, tx);
     let mut app = App::new(tabs, active, loader);
     app.repo = repo_state;
+    if let Some(range) = opts.range {
+        app.start_with_range(range);
+    }
 
     let mut terminal = ratatui::init();
     let result = (|| -> Result<()> {

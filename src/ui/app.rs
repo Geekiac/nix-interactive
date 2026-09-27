@@ -11,6 +11,7 @@ use super::loader::{JobKey, JobState, Loader, Msg};
 use crate::closure::Closure;
 use crate::diff::{self, ChangeKind, ClosureDiff, PackageEntry, Selection};
 use crate::git::{Link, Repo};
+use crate::range::parse_range;
 use crate::sources::Generation;
 use crate::store_path::Version;
 
@@ -275,6 +276,12 @@ pub struct App {
     pub current: Option<CurrentDiff>,
     pub filter: String,
     pub editing_filter: bool,
+    /// Text of the `:` range prompt while it's open.
+    pub range_input: Option<String>,
+    /// A one-off notice for the status bar (e.g. a bad range), cleared by the next key.
+    pub message: Option<String>,
+    /// A range to apply once the active tab's generations have loaded.
+    pending_range: Option<String>,
     /// Toggle keys of hidden categories.
     pub hidden: HashSet<char>,
     pub sort: Sort,
@@ -308,6 +315,9 @@ impl App {
             current: None,
             filter: String::new(),
             editing_filter: false,
+            range_input: None,
+            message: None,
+            pending_range: None,
             hidden: HashSet::from(['b']),
             sort: Sort::Name,
             diff_state: TableState::default(),
@@ -590,6 +600,44 @@ impl App {
         self.diff_state = TableState::default().with_selected(any.then_some(0));
     }
 
+    /// Pins both sides of the active tab to an `OLD:NEW` range (`-1:0`, `40:43`, …).
+    pub fn apply_range(&mut self, text: &str) -> Result<(), String> {
+        let (old, new) = parse_range(text).map_err(|e| e.to_string())?;
+        let gens = self.tab().generations();
+        if gens.is_empty() {
+            return Err("no generations loaded in this tab".into());
+        }
+        let not_here = |e: anyhow::Error| match e.to_string() {
+            e if e.contains("is a path") => format!("{e}; open paths with nixi --path"),
+            e => e,
+        };
+        let old = old.index(gens).map_err(not_here)?;
+        let new = new.index(gens).map_err(not_here)?;
+        let tab = self.tab_mut();
+        tab.base = Some(old);
+        tab.target = Some(new);
+        tab.cursor = new;
+        self.sync();
+        Ok(())
+    }
+
+    /// Opens on a range once the active tab can resolve it (home-manager loads later).
+    pub fn start_with_range(&mut self, range: String) {
+        self.pending_range = Some(range);
+        self.apply_pending_range();
+    }
+
+    fn apply_pending_range(&mut self) {
+        if matches!(self.tab().gens, Gens::Loading) {
+            return;
+        }
+        if let Some(range) = self.pending_range.take() {
+            if let Err(e) = self.apply_range(&range) {
+                self.message = Some(e);
+            }
+        }
+    }
+
     pub fn on_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Closure { store_path, result } => {
@@ -611,6 +659,7 @@ impl App {
                     });
                     self.prefetch(i);
                 }
+                self.apply_pending_range();
             }
             Msg::Repo(result) => {
                 self.repo = match result {
@@ -639,6 +688,25 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        self.message = None;
+        if let Some(input) = &mut self.range_input {
+            match key.code {
+                KeyCode::Char(c) => input.push(c),
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Enter => {
+                    let text = std::mem::take(input);
+                    self.range_input = None;
+                    if let Err(e) = self.apply_range(&text) {
+                        self.message = Some(e);
+                    }
+                }
+                KeyCode::Esc => self.range_input = None,
+                _ => {}
+            }
+            return;
+        }
         if self.editing_filter {
             match key.code {
                 KeyCode::Char(c) => self.filter.push(c),
@@ -689,6 +757,7 @@ impl App {
                 self.editing_filter = true;
                 self.focus = Focus::Diff;
             }
+            KeyCode::Char(':') => self.range_input = Some(String::new()),
             KeyCode::Char('s') => {
                 self.sort = match self.sort {
                     Sort::Name => Sort::Size,
@@ -978,6 +1047,40 @@ pub(crate) mod tests {
         press(&mut app, "\t"); // back to the list; moving resets the scroll
         press(&mut app, "k");
         assert_eq!(app.text_scroll, 0);
+    }
+
+    #[test]
+    fn range_prompt_pins_both_sides() {
+        let mut app = app();
+        press(&mut app, ":-2:-1\n");
+        assert_eq!(app.tab().pair(), Some((0, 1)));
+        assert_eq!(app.tab().cursor, 1);
+        press(&mut app, ":41:43\n");
+        assert_eq!(app.tab().pair(), Some((0, 2)));
+        press(&mut app, "\x1b"); // unpin: back to following the cursor
+        assert_eq!(app.tab().pair(), Some((1, 2)));
+
+        press(&mut app, ":-5:0\n");
+        assert!(app.message.as_deref().unwrap().contains("can't go back 5"));
+        assert_eq!(app.tab().pair(), Some((1, 2)), "unchanged on error");
+        press(&mut app, "j");
+        assert!(app.message.is_none(), "cleared by the next key");
+        press(&mut app, ":0:./result\n");
+        assert!(app.message.as_deref().unwrap().contains("nixi --path"));
+        press(&mut app, ":-1:0\x1b"); // esc cancels without applying
+        assert!(app.range_input.is_none());
+    }
+
+    #[test]
+    fn start_range_waits_for_generations() {
+        let mut app = app();
+        app.active = 1; // home tab, still loading
+        app.start_with_range("-1:0".into());
+        assert_eq!(app.tab().pair(), None);
+        let gens = app.tabs[0].generations().to_vec();
+        app.on_msg(Msg::HomeGenerations(Ok(gens)));
+        assert_eq!(app.tab().base, Some(1));
+        assert_eq!(app.tab().target, Some(2));
     }
 
     #[test]

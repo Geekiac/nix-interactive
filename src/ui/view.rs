@@ -11,6 +11,7 @@ use super::app::{App, Category, DiffMode, Focus, Gens, RepoState, Sort, TabKind}
 use super::detail::Side;
 use super::loader::JobState;
 use crate::git::Link;
+use crate::range::back_label;
 use crate::render::{plain_versions, render_bytes};
 use crate::sources::Generation;
 use crate::store_path::{name, parse_name};
@@ -198,11 +199,24 @@ fn draw_diff(f: &mut Frame, app: &mut App, area: Rect) {
         message(f, area, pane_block(Line::from(" Diff "), focused), text);
         return;
     };
+    // The pair as a `:` range, when both sides are at or before the current generation.
+    let relative = tab.pair().and_then(|(o, n)| {
+        let gens = tab.generations();
+        Some(format!(
+            " ({}:{})",
+            back_label(gens, o)?,
+            back_label(gens, n)?
+        ))
+    });
     let title = Line::from(vec![
         Span::raw(format!(" {} ", tab.title)),
         Span::styled(old.number_label(), Style::new().fg(Color::Red).bold()),
         Span::raw(" → "),
         Span::styled(new.number_label(), Style::new().fg(Color::Green).bold()),
+        Span::styled(
+            relative.unwrap_or_default(),
+            Style::new().fg(Color::DarkGray),
+        ),
         Span::raw(match app.diff_mode {
             DiffMode::Packages => " ",
             DiffMode::Nvd => " · nvd ",
@@ -375,7 +389,19 @@ fn draw_diff(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let line = if app.editing_filter {
+    let line = if let Some(input) = &app.range_input {
+        Line::from(vec![
+            Span::styled(":", Style::new().fg(Color::Yellow).bold()),
+            Span::raw(input.as_str()),
+            Span::styled("█", Style::new().fg(Color::Yellow)),
+            Span::styled(
+                "  OLD:NEW, e.g. -1:0  -2:-1  40:43   enter: go  esc: cancel",
+                Style::new().fg(Color::DarkGray),
+            ),
+        ])
+    } else if let Some(message) = &app.message {
+        Line::from(message.as_str()).fg(Color::Red)
+    } else if app.editing_filter {
         Line::from(vec![
             Span::styled("/", Style::new().fg(Color::Yellow).bold()),
             Span::raw(app.filter.as_str()),
@@ -401,6 +427,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             hint(" unpin  "),
             key("tab"),
             hint(" pane  "),
+            key(":"),
+            hint(" range  "),
             key("/"),
             hint(" filter  "),
             key("s"),
@@ -621,6 +649,8 @@ fn draw_help(f: &mut Frame) {
         ("L", "show config commits between the two (--repo)"),
         ("esc", "clear the filter, else unpin both sides"),
         ("", "unpinned: new = cursor, old = the generation before it"),
+        (":", "compare a range: -1:0 previous vs current, -2:-1,"),
+        ("", "40:43 by number (pins both sides; esc unpins)"),
         ("/", "filter packages by name"),
         ("s", "sort by name or by size change"),
         ("u d c a r b", "show/hide upgraded, downgraded, changed,"),
@@ -680,7 +710,7 @@ mod tests {
         assert!(s.contains("2 home (bob)"), "{s}");
         assert!(s.contains("old   42"), "{s}");
         assert!(s.contains("new * 43"), "{s}");
-        assert!(s.contains("system 42 → 43"), "{s}");
+        assert!(s.contains("system 42 → 43 (-1:0)"), "{s}");
         assert!(s.contains("1 upgraded"), "{s}");
         // The fixture roots reference every package, so all of them count as selected.
         assert!(s.contains("U* firefox"), "{s}");
@@ -717,7 +747,7 @@ mod tests {
             result: Ok("\x1b[1mVersion changes:\x1b[0m\n[U*]  #1  firefox".into()),
         });
         let s = screen(&mut app);
-        assert!(s.contains("system 42 → 43 · nvd"), "{s}");
+        assert!(s.contains("system 42 → 43 (-1:0) · nvd"), "{s}");
         assert!(s.contains("Version changes:"), "{s}");
         assert!(s.contains("[U*]  #1  firefox"), "{s}");
     }
@@ -757,7 +787,7 @@ mod tests {
         };
         app.sync();
         let s = screen(&mut app);
-        assert!(s.contains("system 42 → 43 · commits"), "{s}");
+        assert!(s.contains("system 42 → 43 (-1:0) · commits"), "{s}");
         assert!(s.contains("old 42  ≈aaaaaaa Flake Update"), "{s}");
         assert!(s.contains("new 43  ≈bbbbbbb Add ripgrep"), "{s}");
         assert!(s.contains("≈aaaaaaa"), "list shows links: {s}");

@@ -2,6 +2,7 @@ mod closure;
 mod config;
 mod diff;
 mod git;
+mod range;
 mod render;
 mod sources;
 mod store_path;
@@ -11,12 +12,13 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, StdoutLock, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::closure::{Cache, Closure};
 use crate::config::Config;
 use crate::git::{Link, Repo};
+use crate::range::{parse_range, SideSpec};
 use crate::sources::{profile::SYSTEM_PROFILE, Generation, Source};
 
 /// Interactive historical diff viewer for Nix generations.
@@ -29,6 +31,7 @@ use crate::sources::{profile::SYSTEM_PROFILE, Generation, Source};
     after_help = "Examples:
   nixi                          browse system and home-manager generations
   nixi --repo ~/nix-config      ...linked to the commits they were built from
+  nixi --range -2:-1            ...opened on the switch before last
   nixi diff                     what the last switch changed (-1:0)
   nixi diff -2:-1               ...and the switch before that
   nixi diff 40:43               compare generations 40 and 43
@@ -44,6 +47,10 @@ struct Cli {
 
     #[command(flatten)]
     source: SourceArgs,
+
+    /// Open the viewer on this OLD:NEW range, e.g. `-2:-1` or `40:43` (as in `nixi diff`).
+    #[arg(long, value_name = "OLD:NEW", allow_hyphen_values = true)]
+    range: Option<String>,
 
     /// Extra closure to browse in the viewer's "paths" tab, e.g. `./result`. Repeatable.
     #[arg(long = "path", value_name = "PATH")]
@@ -210,46 +217,15 @@ impl Side {
     }
 }
 
-/// One side of an `OLD:NEW` range.
-#[derive(Debug, PartialEq)]
-enum SideSpec {
-    /// Steps back from the current generation (`0`, `-1`, …).
-    Back(u64),
-    /// A generation number.
-    Number(u64),
-    Path(String),
-}
-
-impl SideSpec {
-    fn parse(s: &str) -> Result<Self> {
-        if s.is_empty() {
-            bail!("empty side in range; expected OLD:NEW, e.g. -1:0");
-        }
-        Ok(match s.parse::<i64>() {
-            Ok(n) if n <= 0 => Self::Back(n.unsigned_abs()),
-            Ok(n) => Self::Number(n.unsigned_abs()),
-            Err(_) => Self::Path(s.to_owned()),
-        })
+fn resolve_side(spec: &SideSpec, source: &SourceArgs, gens: &[Generation]) -> Result<Side> {
+    match spec {
+        SideSpec::Path(path) => Ok(Side {
+            path: PathBuf::from(path),
+            label: path.clone(),
+            number: None,
+        }),
+        _ => Ok(Side::of(&gens[spec.index(gens)?], source)),
     }
-
-    fn resolve(&self, source: &SourceArgs, gens: &[Generation]) -> Result<Side> {
-        match self {
-            Self::Back(back) => Ok(Side::of(sources::relative(gens, *back)?, source)),
-            Self::Number(n) => Ok(Side::of(sources::find(gens, *n)?, source)),
-            Self::Path(path) => Ok(Side {
-                path: PathBuf::from(path),
-                label: path.clone(),
-                number: None,
-            }),
-        }
-    }
-}
-
-fn parse_range(range: &str) -> Result<(SideSpec, SideSpec)> {
-    let (old, new) = range
-        .split_once(':')
-        .with_context(|| format!("expected OLD:NEW, e.g. -1:0 (got {range:?})"))?;
-    Ok((SideSpec::parse(old)?, SideSpec::parse(new)?))
 }
 
 /// Plain-text "what changed in the config" section for two linked generations.
@@ -281,7 +257,10 @@ fn run_diff(
     } else {
         Vec::new()
     };
-    let (left, right) = (old.resolve(source, &gens)?, new.resolve(source, &gens)?);
+    let (left, right) = (
+        resolve_side(&old, source, &gens)?,
+        resolve_side(&new, source, &gens)?,
+    );
 
     let d = diff::diff(
         &Closure::load(&left.path, cache)?,
@@ -411,6 +390,7 @@ fn main() -> Result<()> {
             repo: cli.source.repo.clone(),
             profile: cli.source.profile().to_owned(),
             extra_profiles: config.profiles,
+            range: cli.range,
             home_first: cli.source.home,
             paths: cli.paths,
             cache,
@@ -423,21 +403,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_ranges() {
-        use SideSpec::*;
-        assert_eq!(parse_range("-1:0").unwrap(), (Back(1), Back(0)));
-        assert_eq!(parse_range("-3:-2").unwrap(), (Back(3), Back(2)));
-        assert_eq!(parse_range("40:43").unwrap(), (Number(40), Number(43)));
-        assert_eq!(
-            parse_range("0:./result").unwrap(),
-            (Back(0), Path("./result".into()))
-        );
-        assert_eq!(
-            parse_range("/nix/store/a-x:/nix/store/b-y").unwrap(),
-            (Path("/nix/store/a-x".into()), Path("/nix/store/b-y".into()))
-        );
-        assert!(parse_range("-1").is_err());
-        assert!(parse_range(":0").is_err());
+    fn viewer_range_flag_takes_negative_values() {
+        let cli = Cli::try_parse_from(["nixi", "--range", "-2:-1", "--home"]).unwrap();
+        assert_eq!(cli.range.as_deref(), Some("-2:-1"));
+        assert!(cli.command.is_none() && cli.source.home);
     }
 
     #[test]

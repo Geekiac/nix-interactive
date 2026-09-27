@@ -76,7 +76,7 @@ pub fn generations(profile: &Path) -> Result<Vec<Generation>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sources::relative;
+    use crate::sources::back_from_current;
     use std::os::unix::fs::symlink;
 
     #[test]
@@ -107,7 +107,7 @@ mod tests {
         let gens = generations(&dir.join("system")).unwrap();
         let numbers: Vec<(u64, bool)> = gens.iter().map(|g| (g.number, g.current)).collect();
         assert_eq!(numbers, [(3, false), (7, false), (9, true)]);
-        let numbers = |back| relative(&gens, back).map(|g| g.number).ok();
+        let numbers = |back| back_from_current(&gens, back).map(|i| gens[i].number).ok();
         assert_eq!(
             (numbers(0), numbers(1), numbers(2), numbers(3)),
             (Some(9), Some(7), Some(3), None)
@@ -115,7 +115,7 @@ mod tests {
 
         fs::remove_file(dir.join("system")).unwrap();
         symlink("system-3-link", dir.join("system")).unwrap();
-        assert!(relative(&generations(&dir.join("system")).unwrap(), 1).is_err());
+        assert!(back_from_current(&generations(&dir.join("system")).unwrap(), 1).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 }

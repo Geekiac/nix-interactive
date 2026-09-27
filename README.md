@@ -36,11 +36,14 @@ nixi                      # system and home-manager generations
 nixi --home               # start on the home-manager tab
 nixi --path ./result      # also browse ./result (repeatable), e.g. before switching
 nixi --repo ~/nix-config  # link generations to commits (see below)
+nixi --range -2:-1        # open on a range, as in `nixi diff` (see Commands)
 ```
 
 The left pane lists generations (`*` is the current one); the right pane shows what changed.
 Unpinned, it compares the highlighted generation with the one before it, so walking the list
-replays your history one switch at a time. Pin either side to compare any two.
+replays your history one switch at a time. Pin either side to compare any two, or press `:`
+and type a range like `nixi diff` takes (`-2:-1`, `-5:0`, `40:43`) to pin both at once.
+The diff title shows the pair as a range, e.g. `system 42 → 43 (-1:0)`.
 
 | Key | Action |
 | --- | --- |
@@ -49,6 +52,7 @@ replays your history one switch at a time. Pin either side to compare any two.
 | `1`–`9` | switch tab: system, home-manager, extra profiles, paths |
 | `space` | pin the old side to the highlighted generation (again: unpin) |
 | `enter` | in the list: pin the new side; in the diff: package details |
+| `:` | compare a range: `-1:0`, `-2:-1`, `40:43`, … (pins both sides) |
 | `esc` | clear the filter, else unpin both sides |
 | `/` | filter packages by name |
 | `s` | sort by name or by size change |
