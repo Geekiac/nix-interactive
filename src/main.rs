@@ -34,6 +34,7 @@ use crate::sources::{profile::SYSTEM_PROFILE, Generation, Source};
   nixi --range -2:-1            ...opened on the switch before last
   nixi diff                     what the last switch changed (-1:0)
   nixi diff -2:-1               ...and the switch before that
+  nixi diff -3                  everything since 3 generations ago (-3:0)
   nixi diff 40:43               compare generations 40 and 43
   nixi diff 0:./result          what switching to ./result would change
   nixi diff --home              what the last home-manager change changed
@@ -79,7 +80,8 @@ enum Command {
         ///
         /// Each side is `0` (current) or `-N` (N generations before it), a positive
         /// generation number, or a path: a profile link, `./result`, or a store path.
-        /// Examples: `-2:-1`, `40:43`, `0:./result`.
+        /// A single side is compared with the current generation (`-3` is `-3:0`).
+        /// Examples: `-2:-1`, `-3`, `40:43`, `0:./result`.
         #[arg(value_name = "OLD:NEW", allow_hyphen_values = true)]
         range: Option<String>,
     },
@@ -407,6 +409,14 @@ mod tests {
         let cli = Cli::try_parse_from(["nixi", "--range", "-2:-1", "--home"]).unwrap();
         assert_eq!(cli.range.as_deref(), Some("-2:-1"));
         assert!(cli.command.is_none() && cli.source.home);
+    }
+
+    #[test]
+    fn lone_negative_side_is_not_a_flag() {
+        let cli = Cli::try_parse_from(["nixi", "diff", "-1"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Diff { range: Some(r) }) if r == "-1"));
+        let cli = Cli::try_parse_from(["nixi", "--range", "-3"]).unwrap();
+        assert_eq!(cli.range.as_deref(), Some("-3"));
     }
 
     #[test]

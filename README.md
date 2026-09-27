@@ -52,7 +52,7 @@ The diff title shows the pair as a range, e.g. `system 42 → 43 (-1:0)`.
 | `1`–`9` | switch tab: system, home-manager, extra profiles, paths |
 | `space` | pin the old side to the highlighted generation (again: unpin) |
 | `enter` | in the list: pin the new side; in the diff: package details |
-| `:` | compare a range: `-1:0`, `-2:-1`, `40:43`, … (pins both sides) |
+| `:` | compare a range: `-1` (= `-1:0`), `-2:-1`, `40:43`, … (pins both sides) |
 | `esc` | clear the filter, else unpin both sides |
 | `/` | filter packages by name |
 | `s` | sort by name or by size change |
@@ -84,7 +84,7 @@ Closures are read with `nix path-info --recursive --json` in the background and 
 ```sh
 nixi diff                 # what the last switch changed: same as -1:0
 nixi diff -2:-1           # the switch before that
-nixi diff -5:0            # everything since five generations ago
+nixi diff -5              # everything since five generations ago (same as -5:0)
 nixi diff 40:43           # generations 40 and 43, by number
 nixi diff 0:./result      # what switching to ./result would change
 nixi diff --home          # the last home-manager change
@@ -94,7 +94,7 @@ nixi config               # config file location and the settings in effect
 
 `diff` takes one `OLD:NEW` range. Each side is `0` (the current generation) or `-N` (N
 generations before it), a positive generation number, or a path: a profile link, `./result`,
-or a store path. Counting back skips numbers removed by garbage collection; with `--home` it
+or a store path. A single side is compared with the current generation, so `-1` means `-1:0`. Counting back skips numbers removed by garbage collection; with `--home` it
 steps through distinct home-manager generations.
 
 `--profile`, `--home`, `--user` and `--repo` work with the viewer and every command.

@@ -395,7 +395,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(input.as_str()),
             Span::styled("█", Style::new().fg(Color::Yellow)),
             Span::styled(
-                "  OLD:NEW, e.g. -1:0  -2:-1  40:43   enter: go  esc: cancel",
+                "  OLD:NEW or OLD (vs current), e.g. -1  -2:-1  40:43   enter: go  esc: cancel",
                 Style::new().fg(Color::DarkGray),
             ),
         ])
@@ -638,7 +638,10 @@ fn draw_help(f: &mut Frame) {
     let lines = [
         ("j/k ↑/↓", "move; g/G top/bottom; PgUp/PgDn page"),
         ("tab h/l ←/→", "switch pane; 1-9 switch tab"),
-        (":", "compare a range: -1:0, -2:-1, 40:43 (pins both)"),
+        (
+            ":",
+            "compare a range: -1 (= -1:0), -2:-1, 40:43 (pins both)",
+        ),
         (
             "space / enter",
             "pin old / new to the highlighted generation",

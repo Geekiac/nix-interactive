@@ -1060,6 +1060,9 @@ pub(crate) mod tests {
         press(&mut app, "\x1b"); // unpin: back to following the cursor
         assert_eq!(app.tab().pair(), Some((1, 2)));
 
+        press(&mut app, ":-2\n"); // a lone side is compared with the current generation
+        assert_eq!(app.tab().pair(), Some((0, 2)));
+        press(&mut app, "\x1b");
         press(&mut app, ":-5:0\n");
         assert!(app.message.as_deref().unwrap().contains("can't go back 5"));
         assert_eq!(app.tab().pair(), Some((1, 2)), "unchanged on error");

@@ -1,9 +1,9 @@
 //! `OLD:NEW` generation ranges, shared by `nixi diff` and the viewer's `:` prompt.
 //!
 //! Each side is `0` (the current generation) or `-N` (N before it), a positive generation
-//! number, or a path.
+//! number, or a path. A single side is compared with the current generation: `-1` is `-1:0`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 use crate::sources::{self, Generation};
 
@@ -39,12 +39,13 @@ impl SideSpec {
     }
 }
 
+/// Parses `OLD:NEW`, or a lone `OLD` meaning `OLD:0` (compared with the current generation).
 pub fn parse_range(range: &str) -> Result<(SideSpec, SideSpec)> {
-    let (old, new) = range
-        .trim()
-        .split_once(':')
-        .with_context(|| format!("expected OLD:NEW, e.g. -1:0 (got {range:?})"))?;
-    Ok((SideSpec::parse(old)?, SideSpec::parse(new)?))
+    let range = range.trim();
+    match range.split_once(':') {
+        Some((old, new)) => Ok((SideSpec::parse(old)?, SideSpec::parse(new)?)),
+        None => Ok((SideSpec::parse(range)?, SideSpec::Back(0))),
+    }
 }
 
 /// The `-N` of generation `index` relative to the current one, when it's at or before it.
@@ -77,7 +78,10 @@ mod tests {
             parse_range("/nix/store/a-x:/nix/store/b-y").unwrap(),
             (Path("/nix/store/a-x".into()), Path("/nix/store/b-y".into()))
         );
-        assert!(parse_range("-1").is_err());
+        // A lone side is compared with the current generation.
+        assert_eq!(parse_range("-1").unwrap(), (Back(1), Back(0)));
+        assert_eq!(parse_range("40").unwrap(), (Number(40), Back(0)));
+        assert!(parse_range("").is_err());
         assert!(parse_range(":0").is_err());
     }
 
