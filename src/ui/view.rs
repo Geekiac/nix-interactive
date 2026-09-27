@@ -10,6 +10,7 @@ use super::ansi;
 use super::app::{App, Category, DiffMode, Focus, Gens, RepoState, Sort, TabKind};
 use super::detail::Side;
 use super::loader::JobState;
+use crate::gc;
 use crate::git::Link;
 use crate::range::back_label;
 use crate::render::{plain_versions, render_bytes};
@@ -66,9 +67,45 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.delete_confirm.is_some() {
         draw_delete_confirm(f, app);
     }
+    if app.gc_confirm {
+        draw_gc_confirm(f);
+    }
     if app.show_help {
         draw_help(f);
     }
+}
+
+fn draw_gc_confirm(f: &mut Frame) {
+    let lines = vec![
+        Line::from("Collect garbage?").bold(),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("Runs: "),
+            Span::styled(gc::command_line().join(" "), Style::new().bold()),
+        ]),
+        Line::from("Deletes every store path no GC root uses; they must be downloaded or rebuilt"),
+        Line::from("if needed again. The space freed is shown afterwards, and covers all such"),
+        Line::from("garbage, not only deleted generations."),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("y", Style::new().bold()),
+            Span::raw(" collects, any other key cancels."),
+        ]),
+    ];
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let [area] = Layout::horizontal([Constraint::Length(84)])
+        .flex(Flex::Center)
+        .areas(f.area());
+    let rows = paragraph.line_count(area.width.saturating_sub(2));
+    let height = u16::try_from(rows + 2).unwrap_or(u16::MAX);
+    let [area] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    let block = Block::bordered()
+        .title(" Garbage collection ")
+        .border_style(Style::new().fg(Color::Yellow));
+    f.render_widget(Clear, area);
+    f.render_widget(paragraph.block(block), area);
 }
 
 fn draw_delete_confirm(f: &mut Frame, app: &App) {
@@ -97,7 +134,9 @@ fn draw_delete_confirm(f: &mut Frame, app: &App) {
             Span::raw("Runs: "),
             Span::styled(c.command.clone(), Style::new().bold()),
         ]),
-        Line::from("Only the profile link is removed; nix-collect-garbage frees the space later."),
+        Line::from(
+            "Only the profile link is removed; you'll be offered garbage collection to free the space.",
+        ),
     ];
     lines.extend(
         c.warnings
@@ -708,6 +747,7 @@ fn draw_help(f: &mut Frame) {
             "compare a range: -1 (= -1:0), -2:-1, 40:43 (pins both)",
         ),
         ("D", "delete the highlighted generation (asks to confirm)"),
+        ("C", "collect garbage and show the space freed (asks first)"),
         (
             "space / enter",
             "pin old / new to the highlighted generation",
@@ -896,6 +936,28 @@ mod tests {
             .map(|(x, y)| buffer[(x, y)].symbol().to_owned())
             .collect();
         assert!(narrow.contains("> 4"), "prompt cut off when wrapped");
+    }
+
+    #[test]
+    fn draws_gc_confirmation_and_help_fits() {
+        let mut app = app();
+        app.on_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE));
+        let s = screen(&mut app);
+        assert!(s.contains("Garbage collection"), "{s}");
+        assert!(s.contains("--gc"), "{s}");
+        assert!(s.contains("y collects, any other key cancels"), "{s}");
+
+        // The help popup must fit a 20-row terminal, its last line included.
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.show_help = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buffer[(x, y)].symbol().to_owned())
+            .collect();
+        assert!(text.contains("q ctrl-c"), "help cut off at 20 rows");
     }
 
     #[test]

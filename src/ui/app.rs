@@ -288,6 +288,14 @@ pub struct PendingDelete {
     pub sudo: bool,
 }
 
+/// A confirmed action that needs the real terminal (sudo prompts, nix's progress output),
+/// carried out by the event loop with the TUI suspended.
+pub enum Pending {
+    Delete(PendingDelete),
+    /// Garbage collection (`C`).
+    Gc,
+}
+
 pub struct App {
     pub tabs: Vec<Tab>,
     pub active: usize,
@@ -305,7 +313,9 @@ pub struct App {
     /// A range to apply once the active tab's generations have loaded.
     pending_range: Option<String>,
     pub delete_confirm: Option<DeleteConfirm>,
-    pending_delete: Option<PendingDelete>,
+    /// The `C` confirmation popup is open.
+    pub gc_confirm: bool,
+    pending: Option<Pending>,
     /// Toggle keys of hidden categories.
     pub hidden: HashSet<char>,
     pub sort: Sort,
@@ -343,7 +353,8 @@ impl App {
             message: None,
             pending_range: None,
             delete_confirm: None,
-            pending_delete: None,
+            gc_confirm: false,
+            pending: None,
             hidden: HashSet::from(['b']),
             sort: Sort::Name,
             diff_state: TableState::default(),
@@ -763,12 +774,12 @@ impl App {
                 let confirm = self.delete_confirm.take().expect("checked above");
                 let number = confirm.generation.number;
                 if confirm.input == number.to_string() {
-                    self.pending_delete = Some(PendingDelete {
+                    self.pending = Some(Pending::Delete(PendingDelete {
                         tab: confirm.tab,
                         sudo: delete::needs_sudo(&confirm.profile),
                         profile: confirm.profile,
                         number,
-                    });
+                    }));
                 } else {
                     self.message = Some(format!(
                         "Typed {:?}, not {number}; nothing deleted.",
@@ -780,9 +791,9 @@ impl App {
         }
     }
 
-    /// A confirmed deletion waiting to be run by the event loop.
-    pub fn take_pending_delete(&mut self) -> Option<PendingDelete> {
-        self.pending_delete.take()
+    /// A confirmed action waiting to be run by the event loop.
+    pub fn take_pending(&mut self) -> Option<Pending> {
+        self.pending.take()
     }
 
     /// Updates a tab after a deletion attempt, with its re-read generations on success.
@@ -797,7 +808,7 @@ impl App {
                 t.base = None;
                 t.target = None;
                 self.message = Some(format!(
-                    "Deleted generation {number}. Run nix-collect-garbage to free the space."
+                    "Deleted generation {number}. Press C to collect garbage and free the space."
                 ));
             }
             Err(e) => self.message = Some(format!("Deleting generation {number} failed: {e}")),
@@ -809,6 +820,15 @@ impl App {
         self.message = None;
         if self.delete_confirm.is_some() {
             self.on_delete_key(key.code);
+            return;
+        }
+        if self.gc_confirm {
+            self.gc_confirm = false;
+            if key.code == KeyCode::Char('y') {
+                self.pending = Some(Pending::Gc);
+            } else {
+                self.message = Some("Garbage collection cancelled.".to_owned());
+            }
             return;
         }
         if let Some(input) = &mut self.range_input {
@@ -881,6 +901,7 @@ impl App {
             }
             KeyCode::Char(':') => self.range_input = Some(String::new()),
             KeyCode::Char('D') => self.start_delete(),
+            KeyCode::Char('C') => self.gc_confirm = true,
             KeyCode::Char('s') => {
                 self.sort = match self.sort {
                     Sort::Name => Sort::Size,
@@ -1216,15 +1237,17 @@ pub(crate) mod tests {
         assert!(confirm.warnings.iter().any(|w| w.contains("boot menu")));
 
         press(&mut app, "41\n"); // wrong number
-        assert!(app.take_pending_delete().is_none());
+        assert!(app.take_pending().is_none());
         assert!(app.message.as_deref().unwrap().contains("nothing deleted"));
 
         press(&mut app, "D4x2\x1b"); // letters are ignored; esc cancels
         assert!(app.delete_confirm.is_none());
-        assert!(app.take_pending_delete().is_none());
+        assert!(app.take_pending().is_none());
 
         press(&mut app, "D42\n");
-        let pending = app.take_pending_delete().expect("confirmed");
+        let Some(Pending::Delete(pending)) = app.take_pending() else {
+            panic!("deletion not confirmed");
+        };
         assert_eq!((pending.tab, pending.number), (0, 42));
         assert!(pending.profile.ends_with("system"));
 
@@ -1243,6 +1266,18 @@ pub(crate) mod tests {
             .as_deref()
             .unwrap()
             .contains("Deleted generation 42"));
+    }
+
+    #[test]
+    fn gc_needs_y_to_confirm() {
+        let mut app = app();
+        press(&mut app, "Cn");
+        assert!(!app.gc_confirm && app.take_pending().is_none());
+        assert!(app.message.as_deref().unwrap().contains("cancelled"));
+        press(&mut app, "C");
+        assert!(app.gc_confirm);
+        press(&mut app, "y");
+        assert!(matches!(app.take_pending(), Some(Pending::Gc)));
     }
 
     #[test]

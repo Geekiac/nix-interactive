@@ -25,6 +25,11 @@ records what was added afterwards and where the build differs.
   `nix-env --delete-generations`, with `sudo` for root-owned profiles, refuse the current
   generation, home-manager entries and ad-hoc paths, and warn about the booted generation
   and the boot menu entry. The viewer releases the terminal so sudo can prompt.
+- **Garbage collection** (v0.3.0): `C` in the viewer (press `y`) and `nixi gc` (type
+  `yes`) run `nix-store --gc` and report what Nix says it freed. After deleting, both the
+  viewer and `nixi delete` offer to collect right away (`--gc` skips the question). The
+  total covers all garbage in the store, not only the deleted generation's paths. Exact
+  "what would this free" before collecting costs a ~8 s GC-root scan, so it isn't shown.
 - **`nixi list`** subcommand, and **`nixi config`** (settings in effect; `--example` prints a
   starter config file).
 - **`CLAUDE.md`** for future agent sessions: commands, architecture, and gotchas (flakes

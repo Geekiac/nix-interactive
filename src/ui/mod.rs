@@ -16,11 +16,12 @@ use std::time::Duration;
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
-use self::app::{App, Gens, PendingDelete, RepoState, Tab, TabKind};
+use self::app::{App, Gens, Pending, PendingDelete, RepoState, Tab, TabKind};
 use self::loader::{Loader, Msg};
 use crate::closure::{resolve_store_path, Cache};
 use crate::config::NamedProfile;
 use crate::delete;
+use crate::gc::{self, Freed};
 use crate::git::Repo;
 use crate::sources::{home, profile, Generation};
 
@@ -69,9 +70,33 @@ fn spawn_home(system_gens: Vec<Generation>, opts: &Options, tx: &mpsc::Sender<Ms
     });
 }
 
+fn pause() {
+    print!("Press enter to return to nixi.");
+    let _ = io::stdout().flush();
+    let _ = io::stdin().read_line(&mut String::new());
+}
+
+/// What happened to the garbage collection offered after a deletion.
+enum GcOutcome {
+    Skipped,
+    Freed(Freed),
+    Failed(String),
+}
+
+/// Runs a collection on the plain terminal, leaving its output up until enter is pressed.
+fn collect_garbage() -> Result<Freed, String> {
+    let result = gc::run().map_err(|e| format!("{e:#}"));
+    match &result {
+        Ok(freed) => println!("\nGarbage collection: {}.", freed.summary()),
+        Err(e) => println!("\nGarbage collection failed: {e}"),
+    }
+    pause();
+    result
+}
+
 /// Runs a confirmed deletion on the plain terminal (the TUI is suspended), so sudo can ask
-/// for a password and nix-env's output stays visible.
-fn run_delete(del: &PendingDelete) -> Result<(), String> {
+/// for a password and nix-env's output stays visible, then offers garbage collection.
+fn run_delete(del: &PendingDelete) -> Result<GcOutcome, String> {
     println!(
         "Deleting generation {} of {}{}",
         del.number,
@@ -82,16 +107,27 @@ fn run_delete(del: &PendingDelete) -> Result<(), String> {
             ""
         }
     );
-    let status = delete::command(&del.profile, &[del.number], del.sudo).status();
-    let result = match status {
-        Ok(status) if status.success() => return Ok(()),
-        Ok(status) => format!("nix-env exited with {status}"),
-        Err(e) => format!("couldn't run nix-env: {e}"),
+    let failure = match delete::command(&del.profile, &[del.number], del.sudo).status() {
+        Ok(status) if status.success() => None,
+        Ok(status) => Some(format!("nix-env exited with {status}")),
+        Err(e) => Some(format!("couldn't run nix-env: {e}")),
     };
-    print!("{result}. Press enter to return to nixi.");
-    let _ = io::stdout().flush();
-    let _ = io::stdin().read_line(&mut String::new());
-    Err(result)
+    if let Some(failure) = failure {
+        println!("{failure}.");
+        pause();
+        return Err(failure);
+    }
+    let asked = gc::ask(
+        "Deleted. Collect garbage now to free the space? \
+         (Frees all unused store paths, not only this generation's.)",
+    );
+    Ok(match asked {
+        Ok(true) => match collect_garbage() {
+            Ok(freed) => GcOutcome::Freed(freed),
+            Err(e) => GcOutcome::Failed(e),
+        },
+        _ => GcOutcome::Skipped,
+    })
 }
 
 pub fn run(opts: Options) -> Result<()> {
@@ -163,19 +199,47 @@ pub fn run(opts: Options) -> Result<()> {
                     if key.kind == KeyEventKind::Press {
                         app.on_key(key);
                     }
-                    if let Some(del) = app.take_pending_delete() {
-                        ratatui::restore();
-                        let result = run_delete(&del).and_then(|()| {
-                            profile::generations(&del.profile).map_err(|e| format!("{e:#}"))
-                        });
-                        terminal = ratatui::init();
-                        // The home tab is derived from the first (system) profile tab.
-                        let home = app.tabs.iter().position(|t| t.kind == TabKind::Home);
-                        if let (Ok(gens), 0, Some(home)) = (&result, del.tab, home) {
-                            app.tabs[home].gens = Gens::Loading;
-                            spawn_home(gens.clone(), &opts, &tx);
+                    match app.take_pending() {
+                        Some(Pending::Delete(del)) => {
+                            ratatui::restore();
+                            let outcome = run_delete(&del);
+                            let result = outcome.as_ref().map_err(Clone::clone).and_then(|_| {
+                                profile::generations(&del.profile).map_err(|e| format!("{e:#}"))
+                            });
+                            terminal = ratatui::init();
+                            // The home tab is derived from the first (system) profile tab.
+                            let home = app.tabs.iter().position(|t| t.kind == TabKind::Home);
+                            if let (Ok(gens), 0, Some(home)) = (&result, del.tab, home) {
+                                app.tabs[home].gens = Gens::Loading;
+                                spawn_home(gens.clone(), &opts, &tx);
+                            }
+                            app.deleted(del.tab, del.number, result);
+                            let n = del.number;
+                            match outcome {
+                                Ok(GcOutcome::Freed(freed)) => {
+                                    app.message = Some(format!(
+                                        "Deleted generation {n}; garbage collection: {}.",
+                                        freed.summary()
+                                    ));
+                                }
+                                Ok(GcOutcome::Failed(e)) => {
+                                    app.message = Some(format!(
+                                        "Deleted generation {n}; garbage collection failed: {e}"
+                                    ));
+                                }
+                                _ => {}
+                            }
                         }
-                        app.deleted(del.tab, del.number, result);
+                        Some(Pending::Gc) => {
+                            ratatui::restore();
+                            let result = collect_garbage();
+                            terminal = ratatui::init();
+                            app.message = Some(match result {
+                                Ok(freed) => format!("Garbage collection: {}.", freed.summary()),
+                                Err(e) => format!("Garbage collection failed: {e}"),
+                            });
+                        }
+                        None => {}
                     }
                 }
             }

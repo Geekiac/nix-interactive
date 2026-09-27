@@ -53,6 +53,7 @@ The diff title shows the pair as a range, e.g. `system 42 → 43 (-1:0)`.
 | `space` | pin the old side to the highlighted generation (again: unpin) |
 | `enter` | in the list: pin the new side; in the diff: package details |
 | `D` | delete the highlighted generation (type its number to confirm) |
+| `C` | collect garbage and show the space freed (press `y` to confirm) |
 | `:` | compare a range: `-1` (= `-1:0`), `-2:-1`, `40:43`, … (pins both sides) |
 | `esc` | clear the filter, else unpin both sides |
 | `/` | filter packages by name |
@@ -91,6 +92,7 @@ nixi diff 0:./result      # what switching to ./result would change
 nixi diff --home          # the last home-manager change
 nixi list                 # generations with dates (and commits, with --repo)
 nixi delete 38 -5         # delete generations, after typing `yes` to confirm
+nixi gc                   # collect garbage and report the space freed
 nixi config               # config file location and the settings in effect
 ```
 
@@ -115,8 +117,18 @@ or `-N` (N before the current one).
   generations) and ad-hoc paths can't be deleted either.
 - The system profile belongs to root, so `sudo` is used when the profile isn't yours; the
   viewer steps aside so sudo can ask for your password.
-- Only the profile link goes. Run `nix-collect-garbage` afterwards to free the space. For
-  the system profile, the boot menu keeps the entry until the next `nixos-rebuild`.
+- Only the profile link goes; the space comes back at the next garbage collection. After
+  a deletion, both the viewer and `nixi delete` offer to collect garbage right away
+  (`nixi delete --gc` does it without asking). For the system profile, the boot menu keeps
+  the entry until the next `nixos-rebuild`.
+
+### Garbage collection
+
+`C` in the viewer, or `nixi gc`, runs `nix-store --gc` after confirmation and reports what
+it freed, from Nix's own summary: `Garbage collection: 15.3 GiB freed (1920 store paths
+deleted)`. It frees *every* store path no GC root uses, so the total includes any garbage
+already in the store, not only paths from deleted generations. Freed paths must be
+downloaded or rebuilt if they're needed again.
 
 ## Linking generations to commits
 

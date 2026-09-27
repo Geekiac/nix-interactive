@@ -67,15 +67,16 @@ pub fn needs_sudo(profile: &Path) -> bool {
     matches!((owner, current_uid()), (Some(owner), Some(me)) if owner != me)
 }
 
-/// `nix-env` resolved on PATH, so `sudo` (with its own secure_path) runs the same one.
-fn nix_env() -> PathBuf {
+/// A Nix tool (`nix-env`, `nix-store`) resolved on PATH, so `sudo` (with its own
+/// secure_path) runs the same one.
+pub fn nix_tool(name: &str) -> PathBuf {
     env::var_os("PATH")
         .and_then(|paths| {
             env::split_paths(&paths)
-                .map(|dir| dir.join("nix-env"))
+                .map(|dir| dir.join(name))
                 .find(|p| p.is_file())
         })
-        .unwrap_or_else(|| PathBuf::from("nix-env"))
+        .unwrap_or_else(|| PathBuf::from(name))
 }
 
 /// The command line that deletes `numbers` from `profile`, as program and arguments.
@@ -84,7 +85,7 @@ pub fn command_line(profile: &Path, numbers: &[u64], sudo: bool) -> Vec<String> 
     if sudo {
         line.push("sudo".to_owned());
     }
-    line.push(nix_env().display().to_string());
+    line.push(nix_tool("nix-env").display().to_string());
     line.push("--profile".to_owned());
     line.push(profile.display().to_string());
     line.push("--delete-generations".to_owned());

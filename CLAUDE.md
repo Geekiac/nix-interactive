@@ -73,6 +73,10 @@ feeding both front ends.
   `sudo` when the profile's directory belongs to another user, i.e. the system profile).
   `refusal()` is the single guard (current generation, non-profile paths); the CLI
   (`nixi delete`, type `yes`) and the TUI (`D`, type the number) both go through it.
+- `gc.rs` runs `nix-store --gc` with stdout piped (Nix prints its `N store paths deleted,
+  X freed` summary there; progress goes to stderr) and parses the summary. Used by `nixi gc`,
+  the offer after `nixi delete`, and the TUI's `C`. To test it for real without touching
+  the user's store, point it at a throwaway store: `NIX_REMOTE="local?root=$DIR" nixi gc`.
 - `config.rs`: `~/.config/nix-interactive/config.toml`. Precedence is flag > env
   (`NIXI_REPO`) > config > default, applied in `SourceArgs::apply` in `main.rs`.
 - `main.rs` holds the clap CLI. `SourceArgs` (`--profile/--home/--user/--repo`) is
@@ -96,8 +100,9 @@ feeding both front ends.
   and recomputes `CurrentDiff` when the `(old, new)` store paths change.
 - Tabs: `[profile, home (<user>), extra profiles from config…, paths]`. Commit links for the
   home tab come from tab 0's links, since both share system generation numbers.
-- Actions that need the real terminal (deleting, where sudo may prompt) don't run inside
-  `App`: it records a `PendingDelete`, and the event loop in `ui/mod.rs` calls
+- Actions that need the real terminal (deleting, where sudo may prompt; garbage
+  collection, which shows Nix's progress) don't run inside `App`: it records a `Pending`
+  (`Delete` or `Gc`), and the event loop in `ui/mod.rs` calls
   `ratatui::restore()`, runs the command on the plain terminal, re-inits, and reports back
   with `App::deleted`. Deleting from the system tab also recomputes the home-manager tab.
 - `detail.rs` is the package popup model, and `ansi.rs` converts `nvd --color always` SGR output to

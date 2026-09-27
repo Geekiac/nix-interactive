@@ -2,6 +2,7 @@ mod closure;
 mod config;
 mod delete;
 mod diff;
+mod gc;
 mod git;
 mod range;
 mod render;
@@ -97,6 +98,17 @@ enum Command {
         /// Generations to delete: numbers, or `-N` for N generations before the current one.
         #[arg(value_name = "GEN", required = true, allow_negative_numbers = true)]
         generations: Vec<String>,
+        /// Don't ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+        /// Collect garbage afterwards without asking (otherwise asked interactively).
+        #[arg(long)]
+        gc: bool,
+    },
+    /// Collect garbage (`nix-store --gc`) and report how much space was freed.
+    ///
+    /// Frees every store path no GC root uses, not just ones from deleted generations.
+    Gc {
         /// Don't ask for confirmation.
         #[arg(long)]
         yes: bool,
@@ -303,9 +315,29 @@ fn run_diff(
     })
 }
 
+fn run_gc(yes: bool) -> Result<()> {
+    println!("Garbage collection deletes every store path that no GC root (profile generation,");
+    println!("result link, running system, ...) uses. Removed paths must be downloaded or rebuilt");
+    println!("if needed again.");
+    println!("Command: {}", gc::command_line().join(" "));
+    if !yes {
+        print!("Type 'yes' to collect garbage: ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        if answer.trim() != "yes" {
+            bail!("not confirmed; nothing collected");
+        }
+    }
+    let freed = gc::run()?;
+    println!("Garbage collection: {}.", freed.summary());
+    Ok(())
+}
+
 fn run_delete(
     specs: &[String],
     yes: bool,
+    collect: bool,
     source: &SourceArgs,
     cache: Option<&Cache>,
 ) -> Result<()> {
@@ -364,6 +396,18 @@ fn run_delete(
     }
     let list: Vec<String> = numbers.iter().map(u64::to_string).collect();
     println!("Deleted generation(s) {}.", list.join(", "));
+
+    // Deleting frees nothing until garbage collection; offer it when someone's there to ask.
+    let interactive = !yes && io::stdin().is_terminal();
+    if collect || (interactive && gc::ask("Collect garbage now to free the space?")?) {
+        let freed = gc::run()?;
+        println!(
+            "Garbage collection: {} (this includes any other garbage in the store).",
+            freed.summary()
+        );
+    } else {
+        println!("Run `nixi gc` (or nix-collect-garbage) to free the space.");
+    }
     Ok(())
 }
 
@@ -459,9 +503,12 @@ fn main() -> Result<()> {
             run_diff(range, &cli.source, cache.as_ref(), cli.color.enabled())
         }
         Some(Command::List) => run_list(&cli.source, cache.as_ref()),
-        Some(Command::Delete { generations, yes }) => {
-            run_delete(&generations, yes, &cli.source, cache.as_ref())
-        }
+        Some(Command::Delete {
+            generations,
+            yes,
+            gc,
+        }) => run_delete(&generations, yes, gc, &cli.source, cache.as_ref()),
+        Some(Command::Gc { yes }) => run_gc(yes),
         Some(Command::Config { example: true }) => {
             emit(|out| out.write_all(config::EXAMPLE.as_bytes()))
         }
@@ -490,7 +537,7 @@ mod tests {
         let cli = Cli::try_parse_from(["nixi", "delete", "-3", "40", "--yes"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Delete { generations, yes: true }) if generations == ["-3", "40"]
+            Some(Command::Delete { generations, yes: true, gc: false }) if generations == ["-3", "40"]
         ));
         assert!(
             Cli::try_parse_from(["nixi", "delete"]).is_err(),
