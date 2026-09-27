@@ -52,11 +52,42 @@ records what was added afterwards and where the build differs.
   `--suffix PATH` so the user's own `nix`/`nvd`/`git` win. Tests are inline unit tests plus
   ratatui `TestBackend` rendering tests, not a `tests/` fixture directory.
 
+### Distribution
+
+- **Repo and release**: github.com/Geekiac/nix-interactive, MIT `LICENSE`, tag `v0.1.0`.
+  Anyone can run it with `nix run github:Geekiac/nix-interactive`. The flake's package has
+  full `meta` (description, homepage, license, platforms, mainProgram).
+- **nixpkgs**: draft PR [NixOS/nixpkgs#567518](https://github.com/NixOS/nixpkgs/pull/567518),
+  two commits: `maintainers: add geekiac` and `nix-interactive: init at 0.1.0`
+  (`pkgs/by-name/ni/nix-interactive/package.nix`). The work lives in a worktree,
+  `~/repos/nixpkgs-nix-interactive`, branch `nix-interactive-init`, pushed to the
+  `Geekiac/nixpkgs` fork. CI passes on every job.
+  - The package sets `__structuredAttrs = true` (required for new packages), runs a
+    `versionCheckHook` install check, has `passthru.updateScript = nix-update-script { }`, and
+    wraps only `nvd` and `git` (not `nix`, so the user's own nix, matching their daemon, is used).
+  - nixpkgs' AI policy applies: commits carry `Assisted-by:` trailers (a `Co-authored-by:`
+    trailer doesn't satisfy it) and the PR description discloses AI use.
+  - Kept as a draft by choice: pkgs/README asks whether a new package is mature and used by
+    more than a handful of people, and the project is brand new.
+  - Lessons from CI: check against *current* upstream CONTRIBUTING.md / pkgs/README.md (the
+    local checkout was too old to know the structuredAttrs rule), and never use GitHub's
+    "Update branch" button, because the commit lint rejects merge commits. Rebase and
+    `git push --force-with-lease` instead.
+- **search.nixos.org**: PR [NixOS/nixos-search#1574](https://github.com/NixOS/nixos-search/pull/1574)
+  adds the flake to `flakes/manual.toml` (clone at `~/repos/nixos-search`, branch
+  `add-nix-interactive`). `flake-info` indexes it cleanly. Their criteria exclude programs
+  already in nixpkgs, so the listing may be removed once the nixpkgs PR merges.
+
 ### Not done yet
 
-- No git remote, so nothing is pushed and the README's install URL is a placeholder.
-- The nix-config follow-ups (set `system.configurationRevision`, install `nixi` from this
-  flake) haven't been made.
+- **nixpkgs PR is still a draft.** To mark it ready: rebase onto current master, review
+  `package.nix` and the maintainer entry personally, tick the "Fits CONTRIBUTING.md" and
+  "Follows the automation/AI policy" boxes, and optionally note who uses it.
+- **nixos-search PR** is awaiting a maintainer's review and merge.
+- **nix-config follow-ups** (set `system.configurationRevision` for exact commit links,
+  install `nixi` from this flake) haven't been made.
+- **New releases**: tag `vX.Y.Z`, then bump `version`, `hash` and `cargoHash` in the nixpkgs
+  package, or let the update bot do it after merge.
 
 ## Context
 `nvd diff` answers "what changed between these two closures", but only for two paths you
