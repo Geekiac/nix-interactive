@@ -21,8 +21,8 @@ The binary is `nixi`. Its package diffs match `nvd diff` line for line.
 With flakes:
 
 ```sh
-nix run github:<owner>/nix-interactive           # try it
-nix profile install github:<owner>/nix-interactive
+nix run github:Geekiac/nix-interactive           # try it
+nix profile install github:Geekiac/nix-interactive
 ```
 
 Or add it as an input to your NixOS/home-manager flake and put

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Interactive historical diff viewer for Nix generations"
 license = "MIT"
+repository = "https://github.com/Geekiac/nix-interactive"
 
 [[bin]]
 name = "nixi"
