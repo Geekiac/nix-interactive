@@ -7,7 +7,7 @@ pub mod profile;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 
 use crate::closure::Cache;
@@ -81,17 +81,19 @@ pub fn find(gens: &[Generation], n: u64) -> Result<&Generation> {
         .with_context(|| format!("no generation {n}"))
 }
 
-/// The current generation and the one before it.
-pub fn previous_and_current(gens: &[Generation]) -> Result<(&Generation, &Generation)> {
+/// The generation `back` steps before the current one (0 = current). Steps follow the list,
+/// so they skip numbers removed by garbage collection.
+pub fn relative(gens: &[Generation], back: u64) -> Result<&Generation> {
     let pos = gens
         .iter()
         .position(|g| g.current)
         .context("no current generation")?;
-    if pos == 0 {
-        bail!(
-            "no generation before the current one ({})",
-            gens[pos].number_label()
-        );
-    }
-    Ok((&gens[pos - 1], &gens[pos]))
+    let before = pos;
+    usize::try_from(back)
+        .ok()
+        .and_then(|back| pos.checked_sub(back))
+        .map(|i| &gens[i])
+        .with_context(|| {
+            format!("can't go back {back}: only {before} generation(s) before the current one")
+        })
 }

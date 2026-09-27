@@ -78,13 +78,20 @@ Closures are read with `nix path-info --recursive --json` in the background and 
 ## Commands
 
 ```sh
-nixi diff                 # what the last switch changed (current vs previous generation)
-nixi diff 40 43           # two generations by number
-nixi diff 42 ./result     # numbers, profile links, ./result and store paths mix freely
-nixi diff --home          # current home-manager generation vs the previous different one
+nixi diff                 # what the last switch changed: same as -1:0
+nixi diff -2:-1           # the switch before that
+nixi diff -5:0            # everything since five generations ago
+nixi diff 40:43           # generations 40 and 43, by number
+nixi diff 0:./result      # what switching to ./result would change
+nixi diff --home          # the last home-manager change
 nixi list                 # generations with dates (and commits, with --repo)
 nixi config               # config file location and the settings in effect
 ```
+
+`diff` takes one `OLD:NEW` range. Each side is `0` (the current generation) or `-N` (N
+generations before it), a positive generation number, or a path: a profile link, `./result`,
+or a store path. Counting back skips numbers removed by garbage collection; with `--home` it
+steps through distinct home-manager generations.
 
 `--profile`, `--home`, `--user` and `--repo` work with the viewer and every command.
 `--color` controls colors (`auto` by default, honoring `NO_COLOR`), and `--no-cache` skips

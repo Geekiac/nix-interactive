@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, StdoutLock, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::closure::{Cache, Closure};
@@ -29,8 +29,10 @@ use crate::sources::{profile::SYSTEM_PROFILE, Generation, Source};
     after_help = "Examples:
   nixi                          browse system and home-manager generations
   nixi --repo ~/nix-config      ...linked to the commits they were built from
-  nixi diff                     what the last switch changed
-  nixi diff 40 43               compare two system generations
+  nixi diff                     what the last switch changed (-1:0)
+  nixi diff -2:-1               ...and the switch before that
+  nixi diff 40:43               compare generations 40 and 43
+  nixi diff 0:./result          what switching to ./result would change
   nixi diff --home              what the last home-manager change changed
   nixi list                     list generations
 
@@ -66,11 +68,13 @@ enum Command {
     ///
     /// With no arguments, compares the current generation with the one before it.
     Diff {
-        /// Old side: a generation number, profile link, `./result`, or store path.
-        #[arg(requires = "right")]
-        left: Option<String>,
-        /// New side: a generation number, profile link, `./result`, or store path.
-        right: Option<String>,
+        /// Sides to compare [default: -1:0, the previous generation vs the current one].
+        ///
+        /// Each side is `0` (current) or `-N` (N generations before it), a positive
+        /// generation number, or a path: a profile link, `./result`, or a store path.
+        /// Examples: `-2:-1`, `40:43`, `0:./result`.
+        #[arg(value_name = "OLD:NEW", allow_hyphen_values = true)]
+        range: Option<String>,
     },
     /// List generations, oldest first (`*` marks the current one).
     List,
@@ -206,15 +210,46 @@ impl Side {
     }
 }
 
-fn resolve_side(arg: &str, source: &SourceArgs, gens: &[Generation]) -> Result<Side> {
-    match arg.parse::<u64>() {
-        Ok(n) => Ok(Side::of(sources::find(gens, n)?, source)),
-        Err(_) => Ok(Side {
-            path: PathBuf::from(arg),
-            label: arg.to_owned(),
-            number: None,
-        }),
+/// One side of an `OLD:NEW` range.
+#[derive(Debug, PartialEq)]
+enum SideSpec {
+    /// Steps back from the current generation (`0`, `-1`, …).
+    Back(u64),
+    /// A generation number.
+    Number(u64),
+    Path(String),
+}
+
+impl SideSpec {
+    fn parse(s: &str) -> Result<Self> {
+        if s.is_empty() {
+            bail!("empty side in range; expected OLD:NEW, e.g. -1:0");
+        }
+        Ok(match s.parse::<i64>() {
+            Ok(n) if n <= 0 => Self::Back(n.unsigned_abs()),
+            Ok(n) => Self::Number(n.unsigned_abs()),
+            Err(_) => Self::Path(s.to_owned()),
+        })
     }
+
+    fn resolve(&self, source: &SourceArgs, gens: &[Generation]) -> Result<Side> {
+        match self {
+            Self::Back(back) => Ok(Side::of(sources::relative(gens, *back)?, source)),
+            Self::Number(n) => Ok(Side::of(sources::find(gens, *n)?, source)),
+            Self::Path(path) => Ok(Side {
+                path: PathBuf::from(path),
+                label: path.clone(),
+                number: None,
+            }),
+        }
+    }
+}
+
+fn parse_range(range: &str) -> Result<(SideSpec, SideSpec)> {
+    let (old, new) = range
+        .split_once(':')
+        .with_context(|| format!("expected OLD:NEW, e.g. -1:0 (got {range:?})"))?;
+    Ok((SideSpec::parse(old)?, SideSpec::parse(new)?))
 }
 
 /// Plain-text "what changed in the config" section for two linked generations.
@@ -234,29 +269,19 @@ fn write_commits(out: &mut impl Write, repo: &Repo, old: &Link, new: &Link) -> R
 }
 
 fn run_diff(
-    left: Option<String>,
-    right: Option<String>,
+    range: Option<String>,
     source: &SourceArgs,
     cache: Option<&Cache>,
     color: bool,
 ) -> Result<()> {
-    let args: Vec<&str> = left.iter().chain(&right).map(String::as_str).collect();
-    let needs_gens = args.is_empty() || args.iter().any(|a| a.parse::<u64>().is_ok());
+    let (old, new) = parse_range(range.as_deref().unwrap_or("-1:0"))?;
+    let needs_gens = [&old, &new].iter().any(|s| !matches!(s, SideSpec::Path(_)));
     let gens = if needs_gens {
         source.source().generations(cache)?
     } else {
         Vec::new()
     };
-    let (left, right) = match args[..] {
-        [left, right] => (
-            resolve_side(left, source, &gens)?,
-            resolve_side(right, source, &gens)?,
-        ),
-        _ => {
-            let (prev, cur) = sources::previous_and_current(&gens)?;
-            (Side::of(prev, source), Side::of(cur, source))
-        }
-    };
+    let (left, right) = (old.resolve(source, &gens)?, new.resolve(source, &gens)?);
 
     let d = diff::diff(
         &Closure::load(&left.path, cache)?,
@@ -371,13 +396,9 @@ fn main() -> Result<()> {
         .map(Cache::new);
 
     match cli.command {
-        Some(Command::Diff { left, right }) => run_diff(
-            left,
-            right,
-            &cli.source,
-            cache.as_ref(),
-            cli.color.enabled(),
-        ),
+        Some(Command::Diff { range }) => {
+            run_diff(range, &cli.source, cache.as_ref(), cli.color.enabled())
+        }
         Some(Command::List) => run_list(&cli.source, cache.as_ref()),
         Some(Command::Config { example: true }) => {
             emit(|out| out.write_all(config::EXAMPLE.as_bytes()))
@@ -394,5 +415,35 @@ fn main() -> Result<()> {
             paths: cli.paths,
             cache,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ranges() {
+        use SideSpec::*;
+        assert_eq!(parse_range("-1:0").unwrap(), (Back(1), Back(0)));
+        assert_eq!(parse_range("-3:-2").unwrap(), (Back(3), Back(2)));
+        assert_eq!(parse_range("40:43").unwrap(), (Number(40), Number(43)));
+        assert_eq!(
+            parse_range("0:./result").unwrap(),
+            (Back(0), Path("./result".into()))
+        );
+        assert_eq!(
+            parse_range("/nix/store/a-x:/nix/store/b-y").unwrap(),
+            (Path("/nix/store/a-x".into()), Path("/nix/store/b-y".into()))
+        );
+        assert!(parse_range("-1").is_err());
+        assert!(parse_range(":0").is_err());
+    }
+
+    #[test]
+    fn range_with_leading_dash_is_not_a_flag() {
+        let cli = Cli::try_parse_from(["nixi", "diff", "-2:-1", "--home"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Diff { range: Some(r) }) if r == "-2:-1"));
+        assert!(cli.source.home);
     }
 }
