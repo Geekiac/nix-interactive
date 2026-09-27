@@ -1,38 +1,106 @@
 # nix-interactive
 
-Interactive historical diff viewer for Nix generations (work in progress — see `plan.md`).
+An interactive, historical diff viewer for Nix generations. Walk through your NixOS and
+home-manager generations and see, switch by switch, which packages changed, how the closure
+grew or shrank, why a package is there, and which commits of your configuration did it.
 
-The binary is `nixi`. Run it with no arguments for the interactive viewer:
+The binary is `nixi`. Its package diffs match `nvd diff` line for line.
 
-```sh
-nixi                      # system and home-manager generations, side by side with diffs
-nixi --home               # start on the home-manager tab
-nixi --path ./result      # also browse ./result (repeatable) in a "paths" tab
+```
+ 1 system   2 home (alice)
+┌ Generations ───────────────────────────────────────────────┐┌ system 40 → 41 ──────────────────────────────────────┐
+│      39  2026-09-18 23:32  26.11.20260917.e554fab  ≈e748059││25 upgraded  0 downgraded  0 changed  2 added  …      │
+│old   40  2026-09-19 13:36  26.11.20260917.e554fab  ≈6cbf44c││paths 2027 → 2027 (+134 −134)  disk -54.2MiB  …       │
+│new   41  2026-09-26 12:34  26.11.20260925.e94cb15  ≈ab83f58││   Package          Old          New           Size   │
+│      42  2026-09-27 12:10  26.11.20260926.e158d9e  ≈498d118││U* bind             9.20.26-…    9.20.29-…    +8.1KiB │
+│    * 43  2026-09-27 12:16  26.11.20260926.e158d9e  ≈9465368││U. claude-code      2.1.272      2.1.280      +6.3MiB │
 ```
 
-The left pane lists generations; the right pane shows what changed. Unpinned, it shows
-what the highlighted generation changed compared with the one before it, so walking the
-list replays your history switch by switch. `space` pins the old side and `enter` the new
-side for arbitrary comparisons, `/` filters packages, `s` sorts by size change,
-`u d c a r b` show or hide upgraded, downgraded, changed, added, removed and rebuilt
-packages, and `?` lists every key. Closures load in the background, newest first.
+## Install
 
-In the diff pane, `enter` opens a package's details: every store path on each side with
-its size, and what directly requires it. `w` runs `nix why-depends` from the generation to
-the selected path, showing how the package gets pulled in. `n` swaps the package table for
-`nvd diff`'s own output (the Nix package bundles nvd).
+With flakes:
 
-### Linking generations to commits
+```sh
+nix run github:<owner>/nix-interactive           # try it
+nix profile install github:<owner>/nix-interactive
+```
+
+Or add it as an input to your NixOS/home-manager flake and put
+`inputs.nix-interactive.packages.${system}.default` in your packages. The package brings
+`nix`, `nvd` and `git` along as fallbacks; the ones already on your `PATH` win.
+
+## The viewer
+
+```sh
+nixi                      # system and home-manager generations
+nixi --home               # start on the home-manager tab
+nixi --path ./result      # also browse ./result (repeatable), e.g. before switching
+nixi --repo ~/nix-config  # link generations to commits (see below)
+```
+
+The left pane lists generations (`*` is the current one); the right pane shows what changed.
+Unpinned, it compares the highlighted generation with the one before it, so walking the list
+replays your history one switch at a time. Pin either side to compare any two.
+
+| Key | Action |
+| --- | --- |
+| `j`/`k`, `↑`/`↓`, `g`/`G`, `PgUp`/`PgDn` | move in the focused pane |
+| `tab`, `h`/`l` | switch between the list and the diff |
+| `1`–`9` | switch tab: system, home-manager, extra profiles, paths |
+| `space` | pin the old side to the highlighted generation (again: unpin) |
+| `enter` | in the list: pin the new side; in the diff: package details |
+| `esc` | clear the filter, else unpin both sides |
+| `/` | filter packages by name |
+| `s` | sort by name or by size change |
+| `u` `d` `c` `a` `r` `b` | show/hide upgraded, downgraded, changed, added, removed, rebuilt |
+| `w` | `nix why-depends` for the selected package |
+| `n` | show `nvd diff`'s own output instead |
+| `L` | show the configuration commits between the two generations |
+| `?` | help |
+| `q` | quit |
+
+Rows are marked like nvd's: the change (`U`pgraded, `D`owngraded, `C`hanged, `A`dded,
+`R`emoved, re`B`uilt with the same version) and whether the package is directly selected
+(`*` selected, `+` newly selected, `-` newly unselected, `.` dependency). Rebuilt packages
+are hidden by default; there are usually dozens per switch.
+
+Package details list every store path of the package on both sides with its size, and what
+directly requires it. `w` then shows the chain from the generation down to the package.
+
+Home-manager generations are found inside each system generation when home-manager runs as
+a NixOS module. Consecutive system generations that didn't change home-manager collapse into
+one entry (`35-37`), and numbers refer to system generations. For standalone home-manager,
+pass its profile with `--profile` or add it to the config file.
+
+Closures are read with `nix path-info --recursive --json` in the background and cached in
+`~/.cache/nix-interactive/`. Store paths never change, so the cache never goes stale.
+
+## Commands
+
+```sh
+nixi diff                 # what the last switch changed (current vs previous generation)
+nixi diff 40 43           # two generations by number
+nixi diff 42 ./result     # numbers, profile links, ./result and store paths mix freely
+nixi diff --home          # current home-manager generation vs the previous different one
+nixi list                 # generations with dates (and commits, with --repo)
+nixi config               # config file location and the settings in effect
+```
+
+`--profile`, `--home`, `--user` and `--repo` work with the viewer and every command.
+`--color` controls colors (`auto` by default, honoring `NO_COLOR`), and `--no-cache` skips
+the closure cache.
+
+## Linking generations to commits
 
 Point nixi at your configuration repo to see which commit each generation came from:
 
 ```sh
-nixi --repo ~/repos/nix-config        # or export NIXI_REPO=~/repos/nix-config
+nixi --repo ~/nix-config        # or NIXI_REPO=~/nix-config, or `repo` in the config file
 ```
 
-The list gains a commit column, the diff summary shows the commit range, and `L` switches
-the diff pane to `git log --stat` between the two generations' commits. `list` and `diff`
-take `--repo` too.
+The list gains a commit column, the diff summary shows the commit range, and `L` shows
+`git log --stat` between the two generations' commits. `nixi list` and `nixi diff` include
+commits too.
 
 Links are marked by how sure they are:
 
@@ -42,42 +110,42 @@ Links are marked by how sure they are:
   nixpkgs the generation was built from
 - `?` the newest commit made before the generation, unconfirmed
 
-For exact links, record the revision in your flake's NixOS configuration:
+Without a recorded revision, links assume you commit before switching. For exact links,
+record the revision in your flake's NixOS configuration:
 
 ```nix
 system.configurationRevision = self.rev or self.dirtyRev or null;
 ```
 
-There are also one-shot commands:
+## Configuration
 
-```sh
-nixi diff                 # current system generation vs the one before it
-nixi diff 40 43           # system generations by number
-nixi diff 42 ./result     # numbers, profile links, ./result and store paths mix freely
-nixi list                 # system generations, * = current
+`~/.config/nix-interactive/config.toml` (or `--config PATH`) sets defaults. Flags and
+environment variables take precedence. `nixi config --example` prints this:
 
-nixi list --home          # home-manager generations (NixOS module), per user
-nixi diff --home          # current home-manager generation vs the previous different one
-nixi diff --home 34 43    # home-manager as used by system generations 34 and 43
+```toml
+# Configuration repo, to link generations to commits (like --repo / NIXI_REPO).
+repo = "~/repos/nix-config"
 
-nixi list --profile ~/.local/state/nix/profiles/home-manager   # any other profile
+# Profile to browse (like --profile). Default: /nix/var/nix/profiles/system
+# profile = "/nix/var/nix/profiles/system"
+
+# User whose embedded home-manager generations to show (like --user). Default: $USER
+# user = "alice"
+
+# Extra profiles, each shown in its own tab. `--profile <name>` selects one on the
+# command line, e.g. `nixi list --profile hm`.
+# [[profiles]]
+# name = "hm"
+# path = "~/.local/state/nix/profiles/home-manager"
 ```
-
-With `--home`, generation numbers refer to system generations: home-manager configurations
-are read from each system closure (`unit-home-manager-<user>.service`), and consecutive
-system generations that left home-manager unchanged are listed as one range (`35-37`).
-`--user` picks another user (default `$USER`). Standalone home-manager and `nix profile`
-profiles work through `--profile`.
-
-Diff output matches `nvd diff` line for line, plus a count of packages rebuilt with
-unchanged versions. Closures are read with `nix path-info --recursive --json` and cached in
-`~/.cache/nix-interactive/` (store paths are immutable, so the cache never goes stale;
-`--no-cache` bypasses it).
 
 ## Development
 
 ```sh
-nix develop          # rust toolchain
+nix develop          # Rust toolchain
 cargo test
+cargo run -- diff
 nix flake check      # build + tests, clippy, rustfmt
 ```
+
+The design and milestones are in `plan.md`.

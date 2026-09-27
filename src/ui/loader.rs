@@ -1,7 +1,7 @@
 //! Background closure loading: a small worker pool pulling store paths off a shared queue,
 //! so the UI never blocks on `nix path-info`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::Sender;
@@ -9,7 +9,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use crate::closure::{Cache, Closure};
-use crate::git::{Link, Repo};
+use crate::git::Repo;
 use crate::sources::Generation;
 
 /// Messages from background threads to the UI loop.
@@ -20,8 +20,8 @@ pub enum Msg {
     },
     /// Embedded home-manager generations, computed once system closures are loaded.
     HomeGenerations(Result<Vec<Generation>, String>),
-    /// The configuration repo's history, with commit links by generation number.
-    Repo(Result<(Arc<Repo>, HashMap<u64, Link>), String>),
+    /// The configuration repo's history.
+    Repo(Result<Arc<Repo>, String>),
     /// A finished external command: its stdout, or why it failed.
     Job {
         key: JobKey,

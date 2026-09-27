@@ -1,4 +1,5 @@
 mod closure;
+mod config;
 mod diff;
 mod git;
 mod render;
@@ -8,20 +9,33 @@ mod ui;
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, StdoutLock, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::closure::{Cache, Closure};
+use crate::config::Config;
 use crate::git::{Link, Repo};
 use crate::sources::{profile::SYSTEM_PROFILE, Generation, Source};
 
 /// Interactive historical diff viewer for Nix generations.
 ///
-/// With no subcommand, opens the interactive viewer.
+/// With no subcommand, opens the interactive viewer: generations on the left, what changed
+/// on the right. Press `?` inside for keys.
 #[derive(Parser)]
-#[command(version)]
+#[command(
+    version,
+    after_help = "Examples:
+  nixi                          browse system and home-manager generations
+  nixi --repo ~/nix-config      ...linked to the commits they were built from
+  nixi diff                     what the last switch changed
+  nixi diff 40 43               compare two system generations
+  nixi diff --home              what the last home-manager change changed
+  nixi list                     list generations
+
+Settings can live in ~/.config/nix-interactive/config.toml (see `nixi config --example`)."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -40,6 +54,10 @@ struct Cli {
     /// Don't read or write the closure cache.
     #[arg(long, global = true)]
     no_cache: bool,
+
+    /// Config file [default: ~/.config/nix-interactive/config.toml].
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -56,13 +74,20 @@ enum Command {
     },
     /// List generations, oldest first (`*` marks the current one).
     List,
+    /// Show the config file location and the settings in effect.
+    Config {
+        /// Print an example config file instead.
+        #[arg(long)]
+        example: bool,
+    },
 }
 
 #[derive(Args)]
 struct SourceArgs {
-    /// Profile whose generations are used (with --home: the system profile to look in).
-    #[arg(long, default_value = SYSTEM_PROFILE, global = true)]
-    profile: PathBuf,
+    /// Profile whose generations are used, or the name of one from the config file
+    /// (with --home: the system profile to look in) [default: /nix/var/nix/profiles/system].
+    #[arg(long, global = true)]
+    profile: Option<PathBuf>,
 
     /// Use home-manager generations embedded in system generations (the NixOS module).
     /// Generation numbers then refer to system generations. For standalone home-manager,
@@ -80,6 +105,22 @@ struct SourceArgs {
 }
 
 impl SourceArgs {
+    /// Fills unset options from the config file; flags and NIXI_REPO win.
+    fn apply(&mut self, config: &Config) {
+        let profile = self
+            .profile
+            .take()
+            .or_else(|| config.profile.clone())
+            .unwrap_or_else(|| PathBuf::from(SYSTEM_PROFILE));
+        self.profile = Some(config.resolve_profile(&profile));
+        self.user = self.user.take().or_else(|| config.user.clone());
+        self.repo = self.repo.take().or_else(|| config.repo.clone());
+    }
+
+    fn profile(&self) -> &Path {
+        self.profile.as_deref().unwrap_or(Path::new(SYSTEM_PROFILE))
+    }
+
     fn user(&self) -> String {
         self.user
             .clone()
@@ -90,11 +131,11 @@ impl SourceArgs {
     fn source(&self) -> Source {
         if self.home {
             Source::Home {
-                system_profile: self.profile.clone(),
+                system_profile: self.profile().to_owned(),
                 user: self.user(),
             }
         } else {
-            Source::Profile(self.profile.clone())
+            Source::Profile(self.profile().to_owned())
         }
     }
 
@@ -102,7 +143,7 @@ impl SourceArgs {
     /// generation, so they're linked through the system profile.
     fn links(&self, repo: &Repo, gens: &[Generation]) -> Result<HashMap<u64, Link>> {
         if self.home {
-            Ok(repo.links(&sources::profile::generations(&self.profile)?))
+            Ok(repo.links(&sources::profile::generations(self.profile())?))
         } else {
             Ok(repo.links(gens))
         }
@@ -299,8 +340,31 @@ fn run_list(source: &SourceArgs, cache: Option<&Cache>) -> Result<()> {
     })
 }
 
+fn run_config(path: Option<&Path>, source: &SourceArgs, config: &Config) -> Result<()> {
+    let path = path.map(Path::to_owned).or_else(config::default_path);
+    emit(|out| {
+        match &path {
+            Some(path) if path.exists() => writeln!(out, "config file: {}", path.display())?,
+            Some(path) => writeln!(out, "config file: {} (not found)", path.display())?,
+            None => writeln!(out, "config file: none ($HOME is unset)")?,
+        }
+        writeln!(out, "profile: {}", source.profile().display())?;
+        writeln!(out, "user: {}", source.user())?;
+        match &source.repo {
+            Some(repo) => writeln!(out, "repo: {}", repo.display())?,
+            None => writeln!(out, "repo: (none)")?,
+        }
+        for p in &config.profiles {
+            writeln!(out, "extra profile {}: {}", p.name, p.path.display())?;
+        }
+        Ok(())
+    })
+}
+
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    let config = Config::load(cli.config.as_deref())?;
+    cli.source.apply(&config);
     let cache = (!cli.no_cache)
         .then(Cache::default_dir)
         .flatten()
@@ -315,10 +379,17 @@ fn main() -> Result<()> {
             cli.color.enabled(),
         ),
         Some(Command::List) => run_list(&cli.source, cache.as_ref()),
+        Some(Command::Config { example: true }) => {
+            emit(|out| out.write_all(config::EXAMPLE.as_bytes()))
+        }
+        Some(Command::Config { example: false }) => {
+            run_config(cli.config.as_deref(), &cli.source, &config)
+        }
         None => ui::run(ui::Options {
             user: cli.source.user(),
             repo: cli.source.repo.clone(),
-            profile: cli.source.profile,
+            profile: cli.source.profile().to_owned(),
+            extra_profiles: config.profiles,
             home_first: cli.source.home,
             paths: cli.paths,
             cache,

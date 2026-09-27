@@ -18,6 +18,7 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use self::app::{App, Gens, RepoState, Tab, TabKind};
 use self::loader::{Loader, Msg};
 use crate::closure::{resolve_store_path, Cache};
+use crate::config::NamedProfile;
 use crate::git::Repo;
 use crate::sources::{home, profile, Generation};
 
@@ -30,6 +31,8 @@ pub struct Options {
     pub home_first: bool,
     /// Extra closures (e.g. `./result`) shown in their own tab.
     pub paths: Vec<PathBuf>,
+    /// More profiles from the config file, each in its own tab.
+    pub extra_profiles: Vec<NamedProfile>,
     pub cache: Option<Cache>,
     /// Configuration repo to link generations to commits.
     pub repo: Option<PathBuf>,
@@ -59,23 +62,21 @@ pub fn run(opts: Options) -> Result<()> {
         .file_name()
         .map_or("profile".into(), |n| n.to_string_lossy().into_owned());
 
-    let mut tabs = Vec::new();
     let mut repo_state = RepoState::Unconfigured;
+    if let Some(repo) = opts.repo.clone() {
+        repo_state = RepoState::Loading;
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let result = Repo::load(&repo)
+                .map(Arc::new)
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::Repo(result));
+        });
+    }
+
+    let mut tabs = Vec::new();
     match profile::generations(&opts.profile) {
         Ok(gens) => {
-            if let Some(repo) = opts.repo.clone() {
-                repo_state = RepoState::Loading;
-                let (gens, tx) = (gens.clone(), tx.clone());
-                thread::spawn(move || {
-                    let result = Repo::load(&repo)
-                        .map(|repo| {
-                            let links = repo.links(&gens);
-                            (Arc::new(repo), links)
-                        })
-                        .map_err(|e| format!("{e:#}"));
-                    let _ = tx.send(Msg::Repo(result));
-                });
-            }
             // Home-manager generations need every system closure; work them out off-thread.
             let (system_gens, user, cache, tx) = (
                 gens.clone(),
@@ -100,6 +101,13 @@ pub fn run(opts: Options) -> Result<()> {
             TabKind::Profile,
             Gens::Failed(format!("{e:#}")),
         )),
+    }
+    for extra in &opts.extra_profiles {
+        let gens = match profile::generations(&extra.path) {
+            Ok(gens) => Gens::Ready(gens),
+            Err(e) => Gens::Failed(format!("{e:#}")),
+        };
+        tabs.push(Tab::new(extra.name.clone(), TabKind::Profile, gens));
     }
     if !opts.paths.is_empty() {
         let gens = match path_generations(&opts.paths) {

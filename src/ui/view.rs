@@ -753,7 +753,7 @@ mod tests {
                 path: "/nonexistent".into(),
                 commits: vec![b.clone(), a.clone()],
             }),
-            links,
+            links: HashMap::from([(0, links)]),
         };
         app.sync();
         let s = screen(&mut app);

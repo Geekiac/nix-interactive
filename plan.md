@@ -1,5 +1,16 @@
 # nix-interactive — interactive historical diff viewer for Nix
 
+## Status (2026-09-27)
+
+All six milestones are done. Differences from the plan below:
+
+- Sources are a `Source` enum plus functions, not a trait; ad-hoc paths are the viewer's
+  `--path` tab and plain arguments to `nixi diff`.
+- UI modules are `ui/{app,view,loader,detail,ansi}.rs` rather than one file per pane.
+- The commits view is on `L` (`c` toggles "changed" packages).
+- Version ordering follows nvd, which ranks `1.0pre` above `1.0` (Nix ranks it below).
+- The config file also accepts `profile`, `user`, and named `[[profiles]]` shown as tabs.
+
 ## Context
 `nvd diff` answers "what changed between these two closures", but only for two paths you
 already picked, as static text. There's no way to browse generation history, flip between

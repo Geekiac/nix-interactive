@@ -258,8 +258,9 @@ pub enum RepoState {
     Loading,
     Ready {
         repo: Arc<Repo>,
-        /// By generation number of the profile tab; home-manager tabs share these numbers.
-        links: HashMap<u64, Link>,
+        /// By profile tab index, then generation number. Home-manager generations are
+        /// numbered by system generation, so they use the first tab's links.
+        links: HashMap<usize, HashMap<u64, Link>>,
     },
     Failed(String),
 }
@@ -439,11 +440,15 @@ impl App {
 
     /// Commit link for a generation of the active tab (none for ad-hoc paths).
     pub fn link(&self, g: &Generation) -> Option<&Link> {
-        match (&self.repo, self.tab().kind) {
-            (_, TabKind::Paths) => None,
-            (RepoState::Ready { links, .. }, _) => links.get(&g.number),
-            _ => None,
-        }
+        let RepoState::Ready { links, .. } = &self.repo else {
+            return None;
+        };
+        let tab = match self.tab().kind {
+            TabKind::Paths => return None,
+            TabKind::Home => 0,
+            TabKind::Profile => self.active,
+        };
+        links.get(&tab)?.get(&g.number)
     }
 
     pub fn pair_links(&self) -> Option<(&Link, &Link)> {
@@ -609,7 +614,16 @@ impl App {
             }
             Msg::Repo(result) => {
                 self.repo = match result {
-                    Ok((repo, links)) => RepoState::Ready { repo, links },
+                    Ok(repo) => {
+                        let links = self
+                            .tabs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, t)| t.kind == TabKind::Profile)
+                            .map(|(i, t)| (i, repo.links(t.generations())))
+                            .collect();
+                        RepoState::Ready { repo, links }
+                    }
                     Err(e) => RepoState::Failed(e),
                 };
             }
