@@ -2,14 +2,61 @@
 
 ## Status (2026-09-27)
 
-All six milestones are done. Differences from the plan below:
+All six milestones are done. The sections below are the plan as approved; this section
+records what was added afterwards and where the build differs.
 
-- Sources are a `Source` enum plus functions, not a trait; ad-hoc paths are the viewer's
-  `--path` tab and plain arguments to `nixi diff`.
+### Added after the milestones
+
+- **`OLD:NEW` ranges** replace `nixi diff A B`. `0` is the current generation and `-N` the
+  Nth before it, so `-1:0` is the default (previous vs current) and `-2:-1` is the switch
+  before. Positive numbers are generation numbers (`40:43`); anything else is a path
+  (`0:./result`). A lone side is compared with the current generation, so `-1` = `-1:0`.
+  Counting back follows existing generations, skipping gaps left by garbage collection;
+  with `--home` it steps through distinct home-manager generations. Parsing lives in
+  `src/range.rs`, shared by the CLI and the viewer.
+- **Ranges in the viewer**: `:` opens a prompt that pins both sides to a range on the
+  active tab (errors show in the status bar); `nixi --range OLD:NEW` opens on one,
+  waiting for home-manager generations to load if that tab is active. The diff title shows
+  the pair as a range, e.g. `system 42 → 43 (-1:0)`.
+- **Discoverability fixes**: the status bar leads with `? help` and `: range` so narrow
+  terminals don't truncate them, and the help popup is one line per key and fits 20 rows.
+- **`nixi list`** subcommand, and **`nixi config`** (settings in effect; `--example` prints a
+  starter config file).
+- **`CLAUDE.md`** for future agent sessions: commands, architecture, and gotchas (flakes
+  only see git-tracked files; `nix flake check` doesn't refresh `./result`; tests also run
+  in the build sandbox).
+
+### Differences from the plan
+
+- Sources are a `Source` enum plus functions, not a trait. Ad-hoc paths are the viewer's
+  `--path` tab and path sides of a range, not a separate source module.
 - UI modules are `ui/{app,view,loader,detail,ansi}.rs` rather than one file per pane.
-- The commits view is on `L` (`c` toggles "changed" packages).
-- Version ordering follows nvd, which ranks `1.0pre` above `1.0` (Nix ranks it below).
-- The config file also accepts `profile`, `user`, and named `[[profiles]]` shown as tabs.
+  nvd, `nix why-depends`, and `git log` all run as background jobs through `loader.rs`
+  (no separate `nvd.rs`); nvd's colors go through a small SGR parser (`ansi.rs`).
+- The commits view is on `L` (`c` toggles "changed" packages) and shows `git log --stat`
+  between the two commits rather than `git diff --stat`. Git is driven through the CLI,
+  not gix, and all `flake.lock`s are read with one `git cat-file --batch`.
+- Category toggles are `u d c a r b` (upgraded, downgraded, changed, added, removed,
+  rebuilt; rebuilt hidden by default). `enter` in the diff pane opens package details
+  (`w` runs why-depends), while in the list it pins the new side.
+- Closures come from `nix path-info --recursive --json` without `--closure-size`; sizes are
+  summed from each path's NAR size. All three JSON output shapes are accepted.
+- Version ordering follows nvd, which ranks `1.0pre` above `1.0` (Nix ranks it below), so
+  output matches `nvd diff` line for line. System generation descriptions use the text
+  after the last `-`, because a hostname like `nixos-desktop-4090` breaks nvd's split.
+- Commit links: exact via `configurationRevision` (`+` when dirty), `≈` when the newest
+  earlier commit's `flake.lock` pins the generation's nixpkgs, `?` otherwise.
+- The config file also accepts `profile`, `user`, and named `[[profiles]]` shown as tabs and
+  selectable with `--profile <name>`. Precedence: flag > `NIXI_REPO` > config > default.
+- Packaging uses `rustPlatform.buildRustPackage` (not crane); runtime tools are added with
+  `--suffix PATH` so the user's own `nix`/`nvd`/`git` win. Tests are inline unit tests plus
+  ratatui `TestBackend` rendering tests, not a `tests/` fixture directory.
+
+### Not done yet
+
+- No git remote, so nothing is pushed and the README's install URL is a placeholder.
+- The nix-config follow-ups (set `system.configurationRevision`, install `nixi` from this
+  flake) haven't been made.
 
 ## Context
 `nvd diff` answers "what changed between these two closures", but only for two paths you
